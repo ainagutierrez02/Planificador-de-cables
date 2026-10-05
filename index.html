@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Planificador de cables</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div id="project-start" class="project-start" role="dialog" aria-modal="true" aria-labelledby="project-start-heading">
+        <form id="project-form" class="project-card">
+            <h1 id="project-start-heading">Nuevo proyecto de cables</h1>
+            <p>Ponle un nombre para identificar el plano y el PDF.</p>
+            <label for="project-name">Nombre del proyecto</label>
+            <input id="project-name" type="text" maxlength="80" placeholder="Ej.: Auditorio principal" autocomplete="off" required autofocus>
+            <button type="submit" class="button-primary">Empezar proyecto</button>
+        </form>
+    </div>
+    <div id="editor-shell" inert>
+    <header class="project-toolbar">
+        <details id="file-menu" class="file-menu">
+            <summary>File</summary>
+            <div class="file-menu-actions">
+                <button id="new-project" type="button">Nuevo proyecto</button>
+                <button id="save-pdf" type="button">Guardar PDF</button>
+            </div>
+        </details>
+        <span class="toolbar-separator" aria-hidden="true"></span>
+        <button id="project-title" class="project-title" type="button" title="Pulsa para cambiar el nombre">Proyecto sin nombre</button>
+        <input id="project-title-input" class="project-title-input" type="text" maxlength="80" aria-label="Nombre del proyecto" hidden>
+    </header>
+    <div class="app">
+        <aside class="sidebar">
+            <header class="app-heading">
+                <h1>Planificador de cables</h1>
+                <p>Coloca los equipos y conecta sus puertos para calcular los cables.</p>
+            </header>
+
+            <section class="panel" aria-labelledby="plan-heading">
+                <h2 id="plan-heading">Plano real</h2>
+                <label for="plan-image">Imagen del plano</label>
+                <input id="plan-image" type="file" accept="image/png,image/jpeg,image/webp">
+                <button id="remove-photo" type="button" class="button-secondary" hidden>Quitar foto</button>
+                <div id="plan-controls" hidden>
+                    <div id="reference-setup" class="reference-setup">
+                        <p class="plan-status">Arrastra A y B sobre 2 puntos con distancia conocida.</p>
+                        <label for="reference-distance">Distancia real entre 2 puntos (m)</label>
+                        <input id="reference-distance" type="number" min="0.01" step="any" placeholder="Ej.: 5">
+                        <button id="confirm-distance" type="button" class="button-secondary" disabled>Confirmar distancia</button>
+                    </div>
+                    <p id="plan-status" class="plan-status">Mueve los puntos A y B y escribe la distancia en metros.</p>
+                </div>
+            </section>
+
+            <section class="panel" aria-labelledby="create-heading">
+                <h2 id="create-heading">Crear equipo</h2>
+                <label for="new-device-name">Nombre del equipo</label>
+                <input type="text" id="new-device-name" placeholder="Ej.: Mesa de mezclas" autocomplete="off">
+                <label for="connector-type">Conector</label>
+                <select id="connector-type">
+                    <option value="XLR M">XLR M</option>
+                    <option value="XLR F">XLR F</option>
+                    <option value="Speakon NL2">Speakon NL2</option>
+                    <option value="Speakon NL4">Speakon NL4</option>
+                    <option value="Speakon NL8">Speakon NL8</option>
+                    <option value="1/4 TRS">1/4" TRS</option>
+                    <option value="Ethercon">Ethercon</option>
+                    <option value="Powercon">Powercon</option>
+                    <option value="DMX 3-pin M">DMX 3-pin M</option>
+                    <option value="DMX 3-pin F">DMX 3-pin F</option>
+                    <option value="DMX 5-pin M">DMX 5-pin M</option>
+                    <option value="DMX 5-pin F">DMX 5-pin F</option>
+                </select>
+                <label for="connector-count">Cantidad de conectores</label>
+                <input id="connector-count" type="number" min="1" max="16" step="1" value="1">
+                <details id="extra-connectors-panel" class="extra-connectors">
+                    <summary>Otros tipos de conector</summary>
+                    <div id="extra-connectors"></div>
+                </details>
+                <button id="create-device" type="button" class="button-primary">Crear y colocar en el plano</button>
+            </section>
+
+            <section class="panel" aria-labelledby="place-heading">
+                <h2 id="place-heading">Copiar equipo creado</h2>
+                <label for="device-select">Tipo de equipo creado</label>
+                <select id="device-select" disabled>
+                    <option value="">Crea un equipo primero</option>
+                </select>
+                <button id="add-device" type="button" class="button-secondary" disabled>Colocar copia en el plano</button>
+            </section>
+
+            <section id="link-info" class="panel detail-panel" aria-label="Cable seleccionado"></section>
+        </aside>
+
+        <main class="workspace">
+            <header class="workspace-header">
+                <div>
+                    <h2>Plano de conexiones</h2>
+                    <p id="canvas-hint">Crea un equipo para empezar.</p>
+                </div>
+                <div class="scale-control">
+                    <label for="cm-per-grid">Escala del plano</label>
+                    <div class="scale-input">
+                        <input id="cm-per-grid" type="number" min="0.001" step="any" value="1">
+                        <span>m por cuadro</span>
+                    </div>
+                    <button id="reset-scale" type="button" class="button-secondary">Restablecer escala</button>
+                </div>
+            </header>
+            <div class="canvas-wrap">
+                <canvas id="canvas" tabindex="0" aria-label="Plano de equipos y cables"></canvas>
+                <div id="empty-state" class="empty-state">Crea un equipo y colócalo aquí.</div>
+                <div id="placement-prompt" class="placement-prompt" hidden>Haz clic en el plano para colocar el equipo. Esc cancela.</div>
+            </div>
+            <div class="workspace-footer">
+                <p id="status" role="status" aria-live="polite">Listo para crear un equipo.</p>
+                <button id="cancel-action" type="button" class="button-secondary" hidden>Cancelar</button>
+            </div>
+            <section class="summary" aria-labelledby="summary-heading">
+                <h2 id="summary-heading">Cables necesarios</h2>
+                <div id="summary-list" class="summary-content"></div>
+            </section>
+        </main>
+    </div>
+    </div>
+    <script src="pdf-export.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>
