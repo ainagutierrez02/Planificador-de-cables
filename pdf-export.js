@@ -1,4 +1,4 @@
-// PDF autónomo: imagen JPEG del canvas y relación de cables.
+// Standalone PDF export: canvas image and cable list.
 (function () {
     const pageWidth = 595.28; // A4 vertical en puntos PDF.
     const pageHeight = 841.89;
@@ -33,7 +33,7 @@
     function createProjectPdf(name, canvas, rows) {
         const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
         if (!dataUrl.startsWith('data:image/jpeg;base64,')) {
-            throw new Error('No se pudo convertir el plano a imagen JPEG.');
+            throw new Error('Could not convert the plan to a JPEG image.');
         }
         const jpeg = binaryBytes(atob(dataUrl.slice(dataUrl.indexOf(',') + 1)));
         const pages = makePages(rows);
@@ -56,7 +56,7 @@
             const pageId = 6 + pageIndex * 2;
             let content = '';
             content += textLine(30, 800, name, name.length > 45 ? 12 : 18);
-            content += textLine(30, 779, `Cables necesarios: ${cableCount}`, 10);
+            content += textLine(30, 779, `Required cables: ${cableCount}`, 10);
             content += textLine(520, 800, `${pageIndex + 1} / ${pages.length}`, 10);
             let headerY;
             if (first) {
@@ -70,23 +70,23 @@
                 headerY = 775;
             }
             content += `0.9 0.93 0.95 rg 30 ${headerY - 6} ${pageWidth - 60} 19 re f 0 0 0 rg\n`;
-            content += textLine(37, headerY, 'Listado de cables', 10);
-            if (rows.length === 0) content += textLine(37, headerY - 22, 'Aún no hay cables en el proyecto.', 10);
+            content += textLine(37, headerY, 'Cable list', 10);
+            if (rows.length === 0) content += textLine(37, headerY - 22, 'No cables in this project yet.', 10);
             pageRows.forEach((row, index) => {
                 const y = headerY - 22 - index * 18;
                 const amount = `${row.count} cable${row.count === 1 ? '' : 's'}`;
                 const lengthText = row.meters === null ?
-                    'longitud sin escala (interior de rack)' :
-                    `de ${row.meters.toFixed(2).replace('.', ',')} m${row.count > 1 ? ' cada uno' : ''}`;
+                    'not to scale (inside rack)' :
+                    `${row.meters.toFixed(2)} m${row.count > 1 ? ' each' : ''}`;
                 content += textLine(37, y,
-                    `${amount} ${row.startType} a ${row.endType} ${lengthText}`, 10, 110);
+                    `${amount} ${row.startType} to ${row.endType} ${lengthText}`, 10, 110);
             });
             if (pageIndex === pages.length - 1) {
                 content += `0.35 0.42 0.48 RG 30 48 m ${pageWidth - 30} 48 l S\n`;
                 content += textLine(340, 30,
-                    `Longitud calculada fuera de rack: ${total.toFixed(2).replace('.', ',')} m`, 10);
+                    `Calculated length outside racks: ${total.toFixed(2)} m`, 10);
                 if (internalCount) content += textLine(37, 65,
-                    `Cables internos de rack sin escala: ${internalCount}`, 9);
+                    `Rack cables not to scale: ${internalCount}`, 9);
             }
             objects[contentId] = streamObject(binaryBytes(content));
             objects[pageId] = [binaryBytes(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 3 0 R >> /XObject << /Im1 4 0 R >> >> /Contents ${contentId} 0 R >>`)];

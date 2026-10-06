@@ -1,5 +1,6 @@
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
+const canvasResizeHandle = document.getElementById('canvas-resize-handle');
 const deviceNameInput = document.getElementById('new-device-name');
 const connectorTypeInput = document.getElementById('connector-type');
 const connectorCountInput = document.getElementById('connector-count');
@@ -15,6 +16,8 @@ const cancelButton = document.getElementById('cancel-action');
 const scaleInput = document.getElementById('cm-per-grid');
 const resetScaleButton = document.getElementById('reset-scale');
 const canvasWrap = document.querySelector('.canvas-wrap');
+const canvasAreaMinWidth = canvasWrap.getBoundingClientRect().width || 320;
+const canvasAreaMinHeight = canvasWrap.getBoundingClientRect().height || 240;
 const imageInput = document.getElementById('plan-image');
 const removePhotoButton = document.getElementById('remove-photo');
 const planControls = document.getElementById('plan-controls');
@@ -72,10 +75,18 @@ let dragStart = null;
 let pendingTemplate = null;
 let backgroundImage = null;
 let fixedPlanSize = false;
+let fixedPlanWidth = 0;
+let fixedPlanHeight = 0;
+let fixedCanvasMinWidth = 0;
+let fixedCanvasMinHeight = 0;
+let planDisplayScale = 1;
+let planImageX = 0;
+let planImageY = 0;
 let calibration = null;
 let referenceConfirmed = false;
 let draggingReference = null;
 let pendingExcelImport = [];
+let canvasResizeStart = null;
 
 function setStatus(message) { status.textContent = message; }
 function updateControls() {
@@ -99,7 +110,7 @@ function startProject(event) {
     editorShell.inert = false;
     fileMenu.open = false;
     updateControls();
-    setStatus(`Proyecto «${name}» listo. Crea un equipo o importa un plano.`);
+    setStatus(`Project “${name}” is ready. Add equipment or import a plan.`);
 }
 function startProjectRename() {
     if (!projectName) return;
@@ -122,19 +133,19 @@ function finishProjectRename(save) {
         projectName = name;
         projectTitle.textContent = name;
         updateControls();
-        setStatus(`Proyecto renombrado a «${name}».`);
+        setStatus(`Project renamed to “${name}”.`);
     } else if (save) {
         projectTitleInput.value = projectName;
-        setStatus('El nombre del proyecto no puede estar vacío.');
+        setStatus('Project name cannot be blank.');
     }
 }
 function newProject() {
     fileMenu.open = false;
     hideContextMenu();
     if ((devices.length || links.length || backgroundImage) &&
-        !window.confirm('Crear un proyecto nuevo borrará el plano actual sin guardarlo. ¿Continuar?')) return;
+        !window.confirm('Creating a new project will discard the current plan without saving it. Continue?')) return;
     projectName = '';
-    projectTitle.textContent = 'Proyecto sin nombre';
+    projectTitle.textContent = 'Untitled project';
     projectTitleInput.hidden = true;
     projectTitle.hidden = false;
     devices.length = 0;
@@ -152,6 +163,13 @@ function newProject() {
     pendingTemplate = null;
     backgroundImage = null;
     fixedPlanSize = false;
+    fixedPlanWidth = 0;
+    fixedPlanHeight = 0;
+    fixedCanvasMinWidth = 0;
+    fixedCanvasMinHeight = 0;
+    planDisplayScale = 1;
+    planImageX = 0;
+    planImageY = 0;
     calibration = null;
     referenceConfirmed = false;
     draggingReference = null;
@@ -186,16 +204,16 @@ function saveProjectPdf() {
         const pdf = window.createProjectPdf(projectName, canvas, rows);
         const url = URL.createObjectURL(pdf);
         const anchor = document.createElement('a');
-        const safeName = projectName.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/[. ]+$/g, '').slice(0, 100) || 'proyecto';
+        const safeName = projectName.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/[. ]+$/g, '').slice(0, 100) || 'project';
         anchor.href = url;
         anchor.download = `${safeName}.pdf`;
         document.body.appendChild(anchor);
         anchor.click();
         anchor.remove();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
-        setStatus(`PDF de «${projectName}» descargado.`);
+        setStatus(`PDF for “${projectName}” downloaded.`);
     } catch (error) {
-        setStatus(`No se pudo crear el PDF: ${error.message}`);
+        setStatus(`Could not create PDF: ${error.message}`);
     } finally {
         draw();
     }
@@ -225,13 +243,13 @@ async function readXlsxEntries(file) {
             break;
         }
     }
-    if (endRecord < 0) throw new Error('El archivo no tiene una estructura XLSX válida.');
+    if (endRecord < 0) throw new Error('The file is not a valid XLSX workbook.');
     const entriesCount = view.getUint16(endRecord + 10, true);
     let directoryOffset = view.getUint32(endRecord + 16, true);
     const entries = new Map();
     for (let i = 0; i < entriesCount; i++) {
         if (view.getUint32(directoryOffset, true) !== 0x02014b50) {
-            throw new Error('No se pudo leer el contenido del Excel.');
+            throw new Error('Could not read the Excel workbook.');
         }
         const flags = view.getUint16(directoryOffset + 8, true);
         const method = view.getUint16(directoryOffset + 10, true);
@@ -243,7 +261,7 @@ async function readXlsxEntries(file) {
         const name = decoder.decode(new Uint8Array(buffer, directoryOffset + 46, nameLength));
         directoryOffset += 46 + nameLength + extraLength + commentLength;
         if (name.endsWith('/')) continue;
-        if (flags & 1) throw new Error('El Excel está protegido con contraseña.');
+        if (flags & 1) throw new Error('The Excel workbook is password protected.');
         const localNameLength = view.getUint16(localOffset + 26, true);
         const localExtraLength = view.getUint16(localOffset + 28, true);
         const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
@@ -254,14 +272,14 @@ async function readXlsxEntries(file) {
             const stream = new Blob([compressed]).stream()
                 .pipeThrough(new DecompressionStream('deflate-raw'));
             contents = await new Response(stream).arrayBuffer();
-        } else throw new Error('No se puede descomprimir este Excel en este navegador.');
+        } else throw new Error('This browser cannot decompress this Excel workbook.');
         entries.set(name, new TextDecoder('utf-8').decode(contents));
     }
     return entries;
 }
 function parseWorksheetXml(xmlText, sharedStrings) {
     const xml = new DOMParser().parseFromString(xmlText, 'application/xml');
-    if (xml.querySelector('parsererror')) throw new Error('Una hoja del Excel está dañada.');
+    if (xml.querySelector('parsererror')) throw new Error('An Excel worksheet is damaged.');
     const grid = [];
     for (const row of xml.getElementsByTagName('row')) {
         const rowIndex = Math.max(0, Number(row.getAttribute('r') || grid.length + 1) - 1);
@@ -288,15 +306,14 @@ function findExcelModelColumn(grid) {
     const scanRows = Math.min(grid.length, 60);
     for (let rowIndex = 0; rowIndex < scanRows; rowIndex++) {
         const headers = grid[rowIndex] ?? [];
-        let modelColumn = headers.findIndex(value => normalizeHeader(value) === 'modelo');
-        if (modelColumn < 0) modelColumn = headers.findIndex(value =>
-            ['model', 'modeloequipo', 'modelodeequipo'].includes(normalizeHeader(value)));
+        const modelColumn = headers.findIndex(value =>
+            ['model', 'modelo', 'modeloequipo', 'modelodeequipo'].includes(normalizeHeader(value)));
         if (modelColumn < 0) continue;
         const findColumn = names => headers.findIndex(value => names.includes(normalizeHeader(value)));
         return {
             headerRow: rowIndex,
             modelColumn,
-            quantityColumn: findColumn(['cantidad', 'qty', 'quantity', 'unidades', 'ud', 'uds']),
+            quantityColumn: findColumn(['quantity', 'cantidad', 'qty', 'unidades', 'ud', 'uds']),
             brandColumn: findColumn(['marca', 'brand', 'fabricante']),
             nameColumn: findColumn(['nombre', 'equipo', 'nombreequipo', 'denominacion', 'producto'])
         };
@@ -307,7 +324,7 @@ async function readExcelModelRows(file) {
     const entries = await readXlsxEntries(file);
     const workbookXml = entries.get('xl/workbook.xml');
     const relationsXml = entries.get('xl/_rels/workbook.xml.rels');
-    if (!workbookXml || !relationsXml) throw new Error('No se encontraron las hojas del Excel.');
+    if (!workbookXml || !relationsXml) throw new Error('No worksheets were found in the Excel workbook.');
     const workbook = new DOMParser().parseFromString(workbookXml, 'application/xml');
     const relations = new DOMParser().parseFromString(relationsXml, 'application/xml');
     const relationTargets = new Map([...relations.getElementsByTagName('Relationship')]
@@ -326,32 +343,77 @@ async function readExcelModelRows(file) {
         const sheetXml = entries.get(sheetPath);
         if (!sheetXml) continue;
         const grid = parseWorksheetXml(sheetXml, sharedStrings);
-        const columns = findExcelModelColumn(grid);
-        if (!columns) continue;
-        const rows = [];
-        for (let i = columns.headerRow + 1; i < grid.length; i++) {
-            const cells = grid[i] ?? [];
-            const model = String(cells[columns.modelColumn] ?? '').trim();
-            if (!model) continue;
-            const rawQuantity = columns.quantityColumn < 0 ? 1 :
-                Number(String(cells[columns.quantityColumn] ?? '').replace(',', '.'));
-            const quantity = Number.isSafeInteger(rawQuantity) && rawQuantity > 0 && rawQuantity <= 50 ?
-                rawQuantity : null;
-            rows.push({
-                model,
-                quantity,
-                brand: columns.brandColumn < 0 ? '' : String(cells[columns.brandColumn] ?? '').trim(),
-                name: columns.nameColumn < 0 ? '' : String(cells[columns.nameColumn] ?? '').trim(),
-                rowNumber: i + 1
-            });
-        }
-        return { sheetName: sheet.getAttribute('name') || 'Hoja', rows };
+        const result = modelRowsFromGrid(grid, sheet.getAttribute('name') || 'Hoja');
+        if (result) return result;
     }
-    throw new Error('No encuentro una columna «Modelo» en las primeras 60 filas.');
+    throw new Error('Could not find a “Model” or “Modelo” column in the first 60 rows.');
+}
+function modelRowsFromGrid(grid, sheetName) {
+    const columns = findExcelModelColumn(grid);
+    if (!columns) return null;
+    const rows = [];
+    for (let i = columns.headerRow + 1; i < grid.length; i++) {
+        const cells = grid[i] ?? [];
+        const model = String(cells[columns.modelColumn] ?? '').trim();
+        if (!model) continue;
+        const rawQuantity = columns.quantityColumn < 0 ? 1 :
+            Number(String(cells[columns.quantityColumn] ?? '').replace(',', '.'));
+        const quantity = Number.isSafeInteger(rawQuantity) && rawQuantity > 0 && rawQuantity <= 50 ?
+            rawQuantity : null;
+        rows.push({
+            model,
+            quantity,
+            brand: columns.brandColumn < 0 ? '' : String(cells[columns.brandColumn] ?? '').trim(),
+            name: columns.nameColumn < 0 ? '' : String(cells[columns.nameColumn] ?? '').trim(),
+            rowNumber: i + 1
+        });
+    }
+    return { sheetName, rows };
+}
+function parseCsvGrid(text) {
+    const source = text.replace(/^\uFEFF/, '');
+    const firstLine = source.split(/\r?\n/, 1)[0] ?? '';
+    const countDelimiter = delimiter => {
+        let count = 0;
+        let quoted = false;
+        for (let i = 0; i < firstLine.length; i++) {
+            if (firstLine[i] === '"' && firstLine[i + 1] === '"' && quoted) i++;
+            else if (firstLine[i] === '"') quoted = !quoted;
+            else if (!quoted && firstLine[i] === delimiter) count++;
+        }
+        return count;
+    };
+    const delimiter = [',', ';', '\t'].sort((a, b) => countDelimiter(b) - countDelimiter(a))[0];
+    const rows = [];
+    let row = [];
+    let cell = '';
+    let quoted = false;
+    for (let i = 0; i < source.length; i++) {
+        const char = source[i];
+        if (char === '"' && quoted && source[i + 1] === '"') { cell += '"'; i++; }
+        else if (char === '"') quoted = !quoted;
+        else if (!quoted && char === delimiter) { row.push(cell); cell = ''; }
+        else if (!quoted && (char === '\n' || char === '\r')) {
+            if (char === '\r' && source[i + 1] === '\n') i++;
+            row.push(cell); rows.push(row); row = []; cell = '';
+        } else cell += char;
+    }
+    if (cell.length || row.length) { row.push(cell); rows.push(row); }
+    return rows;
 }
 function findCatalogProduct(model, brand) {
     const key = normalizeCatalogKey(model);
     if (!key) return { status: 'empty', product: null };
+    const brandKey = normalizeCatalogKey(brand);
+    let exactReferences = harmanProductCatalog.filter(product =>
+        normalizeCatalogKey(product.reference) === key);
+    if (brandKey && exactReferences.length) {
+        const matchingBrand = exactReferences.filter(product =>
+            normalizeCatalogKey(product.brand).includes(brandKey) ||
+            brandKey.includes(normalizeCatalogKey(product.brand)));
+        if (matchingBrand.length) exactReferences = matchingBrand;
+    }
+    if (exactReferences.length === 1) return { status: 'exact', product: exactReferences[0] };
     let candidates = harmanProductCatalog.filter(product => {
         const keys = [product.reference, product.model, product.title].map(normalizeCatalogKey);
         const brandPrefixes = product.brand === 'JBL Professional' ? ['jbl', 'jblprofessional'] :
@@ -362,7 +424,6 @@ function findCatalogProduct(model, brand) {
         return keys.includes(key) || netgearSku || keys.some(catalogKey =>
             brandPrefixes.some(prefix => key === prefix + catalogKey));
     });
-    const brandKey = normalizeCatalogKey(brand);
     if (brandKey && candidates.length) {
         const byBrand = candidates.filter(product =>
             normalizeCatalogKey(product.brand).includes(brandKey) || brandKey.includes(normalizeCatalogKey(product.brand)));
@@ -389,12 +450,12 @@ function buildImportPreviewRows(excelRows) {
         const validConnectors = connectorTypes.length > 0 && connectorTypes.length <= 64 && !hasUnmappedConnector;
         const ready = match.status === 'exact' && row.quantity !== null && validConnectors;
         const canManuallyImport = !ready && match.status === 'partial' && row.quantity !== null && validConnectors;
-        const reason = !row.quantity ? 'Revisa la cantidad' : match.status === 'missing' ?
-            'Modelo fuera del catálogo' : match.status === 'ambiguous' ? 'Modelo ambiguo' :
-            match.status === 'partial' ? 'Coincidencia aproximada' :
-            hasUnmappedConnector ? 'Revisa conectores en la ficha' :
-            !connectorTypes.length ? 'Faltan datos de conectores' : connectorTypes.length > 64 ?
-            'Más de 64 conectores' : 'Encontrado en catálogo';
+        const reason = !row.quantity ? 'Check quantity' : match.status === 'missing' ?
+            'Model not in catalogue' : match.status === 'ambiguous' ? 'Ambiguous model' :
+            match.status === 'partial' ? 'Possible match' :
+            hasUnmappedConnector ? 'Check connectors in product sheet' :
+            !connectorTypes.length ? 'Connector data missing' : connectorTypes.length > 64 ?
+            'More than 64 connectors' : 'Found in catalogue';
         return { ...row, product, connectorTypes, ready, canManuallyImport, reason };
     });
 }
@@ -403,17 +464,17 @@ function updateImportSelection() {
         .reduce((count, input) => count + (pendingExcelImport[Number(input.dataset.index)]?.quantity ?? 0), 0);
     const reviewCount = pendingExcelImport.filter(row => !row.ready).length;
     confirmImportButton.disabled = selected === 0;
-    confirmImportButton.textContent = selected ? `Importar ${selected} equipos` : 'Importar equipos';
+    confirmImportButton.textContent = selected ? `Import ${selected} items` : 'Import equipment';
     importPreviewNote.textContent = reviewCount ?
-        `${reviewCount} fila${reviewCount === 1 ? '' : 's'} requieren revisión. Marca la casilla de una coincidencia aproximada si confirmas el modelo.` :
-        'Los equipos se colocarán en el plano. El Excel no define las conexiones entre ellos.';
+        `${reviewCount} row${reviewCount === 1 ? '' : 's'} need review. Tick a possible match if you confirm the model.` :
+        'Equipment will be placed on the plan. The spreadsheet does not define connections between items.';
 }
 function showExcelImportPreview(sheetName, rows) {
     pendingExcelImport = buildImportPreviewRows(rows);
     importPreviewRows.replaceChildren();
     const readyCount = pendingExcelImport.filter(row => row.ready)
         .reduce((count, row) => count + row.quantity, 0);
-    importPreviewSummary.textContent = `${rows.length} filas de «${sheetName}». ${readyCount} equipos listos para importar.`;
+    importPreviewSummary.textContent = `${rows.length} rows from “${sheetName}”. ${readyCount} items ready to import.`;
     pendingExcelImport.forEach((row, index) => {
         const tr = document.createElement('tr');
         const selectCell = document.createElement('td');
@@ -424,9 +485,9 @@ function showExcelImportPreview(sheetName, rows) {
             checkbox.className = 'import-row-select';
             checkbox.dataset.index = String(index);
             checkbox.setAttribute('aria-label', row.canManuallyImport ?
-                `Confirmar la coincidencia aproximada de ${row.model} con ${row.product.model} e importar` :
-                `Importar ${row.model}`);
-            if (row.canManuallyImport) checkbox.title = `Confirma que ${row.model} corresponde a ${row.product.model}`;
+                `Confirm possible match of ${row.model} to ${row.product.model} and import` :
+                `Import ${row.model}`);
+            if (row.canManuallyImport) checkbox.title = `Confirm that ${row.model} matches ${row.product.model}`;
             checkbox.addEventListener('change', updateImportSelection);
             selectCell.appendChild(checkbox);
         } else selectCell.textContent = '—';
@@ -439,19 +500,19 @@ function showExcelImportPreview(sheetName, rows) {
             modelCell.appendChild(detail);
         }
         const quantityCell = document.createElement('td');
-        quantityCell.textContent = row.quantity === null ? 'Revisar' : String(row.quantity);
+        quantityCell.textContent = row.quantity === null ? 'Review' : String(row.quantity);
         const connectorCell = document.createElement('td');
         const connectorCounts = row.connectorTypes.reduce((counts, type) => {
             counts.set(type, (counts.get(type) ?? 0) + 1);
             return counts;
         }, new Map());
         connectorCell.textContent = connectorCounts.size ? [...connectorCounts]
-            .map(([type, count]) => `${type} × ${count}`).join(' · ') : 'Sin datos';
+            .map(([type, count]) => `${type} × ${count}`).join(' · ') : 'No data';
         if (row.product?.evidence) connectorCell.title = row.product.evidence;
         const stateCell = document.createElement('td');
         stateCell.textContent = row.reason;
         stateCell.className = row.ready ? 'import-state-ready' : 'import-state-review';
-        if (row.canManuallyImport) stateCell.title = 'Marca la casilla de esta fila si confirmas que el modelo sugerido es correcto.';
+        if (row.canManuallyImport) stateCell.title = 'Tick this row if you confirm the suggested model is correct.';
         if (row.product?.sources?.length) {
             const sourceLink = document.createElement('a');
             sourceLink.className = 'import-source-link';
@@ -459,7 +520,7 @@ function showExcelImportPreview(sheetName, rows) {
                 source.includes('crownaudio.com') || source.includes('bssaudio.com')) || row.product.sources[0];
             sourceLink.target = '_blank';
             sourceLink.rel = 'noopener noreferrer';
-            sourceLink.textContent = 'Ficha';
+            sourceLink.textContent = 'Product sheet';
             sourceLink.style.marginLeft = '7px';
             stateCell.appendChild(sourceLink);
         }
@@ -472,14 +533,14 @@ function showExcelImportPreview(sheetName, rows) {
 function importSelectedExcelRows() {
     if (backgroundImage && !referenceConfirmed) {
         importPreview.close();
-        setStatus('Confirma primero la escala del plano para importar equipos.');
+        setStatus('Confirm the plan scale before importing equipment.');
         return;
     }
     const selected = [...importPreviewRows.querySelectorAll('.import-row-select:checked')]
         .map(input => pendingExcelImport[Number(input.dataset.index)]).filter(Boolean);
     if (!selected.length) return;
     const total = selected.reduce((count, row) => count + row.quantity, 0);
-    if (devices.length && !window.confirm(`Se añadirán ${total} equipos al plano actual. ¿Continuar?`)) return;
+    if (devices.length && !window.confirm(`${total} items will be added to the current plan. Continue?`)) return;
     freezePlanSize();
     const margin = 24;
     const columnStep = Math.max(190, ...selected.map(row => {
@@ -511,42 +572,45 @@ function importSelectedExcelRows() {
     updateSummary();
     updateHint();
     draw();
-    setStatus(`${total} equipos importados${skipped ? `. ${skipped} filas necesitan revisión` : ''}.`);
+    setStatus(`${total} items imported${skipped ? `. ${skipped} rows need review` : ''}.`);
 }
 async function handleExcelImport(file) {
     if (!file) return;
     fileMenu.open = false;
-    if (!file.name.toLowerCase().endsWith('.xlsx')) {
-        setStatus('Elige un archivo Excel .xlsx. Los archivos .xls antiguos no son compatibles.');
+    const extension = file.name.toLowerCase().split('.').pop();
+    if (!['xlsx', 'csv'].includes(extension)) {
+        setStatus('Choose an .xlsx or .csv file. Older .xls files are not supported.');
         return;
     }
     if (!harmanProductCatalog.length) {
-        setStatus('No se pudo cargar el catálogo local de equipos.');
+        setStatus('Could not load the local equipment catalogue.');
         return;
     }
     try {
-        setStatus('Leyendo el Excel y buscando modelos en el catálogo…');
-        const workbook = await readExcelModelRows(file);
-        if (!workbook.rows.length) throw new Error('La columna «Modelo» no contiene equipos.');
+        setStatus(`Reading ${extension === 'csv' ? 'CSV' : 'Excel'} and matching models in the catalogue…`);
+        const workbook = extension === 'csv' ?
+            modelRowsFromGrid(parseCsvGrid(await file.text()), file.name) : await readExcelModelRows(file);
+        if (!workbook) throw new Error('Could not find a “Model” or “Modelo” column in the first 60 rows.');
+        if (!workbook.rows.length) throw new Error('The “Model” or “Modelo” column contains no equipment.');
         showExcelImportPreview(workbook.sheetName, workbook.rows);
     } catch (error) {
-        setStatus(`No se pudo importar el Excel: ${error.message}`);
+        setStatus(`Could not import file: ${error.message}`);
     }
 }
 function updateHint() {
     emptyState.hidden = devices.length > 0 || Boolean(backgroundImage);
     placementPrompt.hidden = !pendingTemplate;
-    placementPrompt.textContent = 'Haz clic en el plano para colocar el equipo. Esc cancela.';
+    placementPrompt.textContent = 'Click on the plan to place the equipment. Press Esc to cancel.';
     cancelButton.hidden = !pendingTemplate && !selectedPort;
-    hint.textContent = pendingTemplate ? `Haz clic en el plano para colocar ${pendingTemplate.name}.` :
-        selectedPort ? 'Selecciona el conector de destino. Pulsa Esc para cancelar.' :
+    hint.textContent = pendingTemplate ? `Click on the plan to place ${pendingTemplate.name}.` :
+        selectedPort ? 'Select the destination connector. Press Esc to cancel.' :
         backgroundImage && !referenceConfirmed ? calibration?.meters ?
-            'Confirma la distancia para ocultar A y B.' :
-            'Arrastra A y B y escribe su distancia real en metros.' :
-        devices.length === 0 ? 'Crea un equipo para empezar.' :
-        selectedDevices.size > 1 ? 'Equipos seleccionados: clic derecho para agruparlos como rack o eliminarlos. Ctrl+C y Ctrl+V copia y pega.' :
-        selectedDevice ? 'Arrastra los puntos para cambiar el tamaño. Pulsa Supr para borrar. Ctrl+C copia el equipo.' :
-        'Arrastra para seleccionar varios equipos. Ctrl o Mayús + clic añade equipos. Clic derecho abre acciones.';
+            'Confirm the distance to hide points A and B.' :
+            'Drag points A and B, then enter their real distance in metres.' :
+        devices.length === 0 ? 'Add equipment to get started.' :
+        selectedDevices.size > 1 ? 'Selected equipment: right-click to group as a rack or delete. Ctrl+C and Ctrl+V copy and paste.' :
+        selectedDevice ? 'Drag the handles to resize. Press Delete to remove. Ctrl+C copies the equipment.' :
+        'Drag to select multiple items. Ctrl or Shift + click adds items. Right-click for actions.';
 }
 function cancelAction() {
     pendingTemplate = null;
@@ -555,13 +619,14 @@ function cancelAction() {
     resizingDevice = null;
     canvas.style.cursor = '';
     updateHint();
-    setStatus('Acción cancelada.');
+    setStatus('Action cancelled.');
     draw();
 }
 
 const connectorMap = {
     'XLR M': ['#0000FF', 'X'], 'XLR F': ['#ADD8E6', 'X'],
-    'Speakon NL2': ['#008080', 'S'], 'Speakon NL4': ['#008080', 'S'],
+    'Speakon NL2': ['#008080', 'S'], 'Speakon NL2 / 1/4 TS combo': ['#008080', 'S'],
+    'Speakon NL4': ['#008080', 'S'],
     'Speakon NL8': ['#008080', 'S'], '1/4 TRS': ['#7D64B0', 'T'],
     'XLR Combo': ['#42a5f5', 'C'], RCA: ['#8bc34a', 'R'],
     '3.5 mm': ['#b0bec5', 'A'], Euroblock: ['#e0a85b', 'E'],
@@ -608,15 +673,15 @@ function updateCalibration() {
         calibration.b.y - calibration.a.y);
     if (distanceInput.value.trim() === '' || !Number.isFinite(meters) || meters <= 0) {
         calibration.meters = null;
-        planStatus.textContent = 'Arrastra A y B y escribe una distancia mayor que 0 m.';
+        planStatus.textContent = 'Drag points A and B and enter a distance greater than 0 m.';
     } else if (pixels < 5) {
         calibration.meters = null;
-        planStatus.textContent = 'Separa más los puntos A y B.';
+        planStatus.textContent = 'Move points A and B further apart.';
     } else {
         calibration.meters = meters;
         cmPerPixel = meters * 100 / pixels;
         scaleInput.value = Number((cmPerPixel * gridSize / 100).toPrecision(6));
-        planStatus.textContent = `${meters} m entre A y B. Puedes moverlos para afinar la escala.`;
+        planStatus.textContent = `${meters} m between A and B. Move them to fine-tune the scale.`;
         updateSummary();
         if (selectedLink) showLinkInfo(selectedLink);
         if (selectedDevice) showDeviceInfo(selectedDevice);
@@ -630,11 +695,11 @@ function confirmDistance() {
     referenceConfirmed = true;
     referenceSetup.hidden = true;
     planControls.hidden = true;
-    planStatus.textContent = 'Escala actualizada.';
+    planStatus.textContent = 'Scale updated.';
     updateControls();
     updateHint();
     draw();
-    setStatus('Escala actualizada. Ya puedes colocar equipos.');
+    setStatus('Scale updated. You can now place equipment.');
 }
 function resetScale() {
     if (backgroundImage) {
@@ -643,12 +708,12 @@ function resetScale() {
         distanceInput.value = '';
         referenceSetup.hidden = false;
         planControls.hidden = false;
-        planStatus.textContent = 'Ajusta A y B y escribe la nueva distancia en metros.';
+        planStatus.textContent = 'Adjust points A and B and enter the new distance in metres.';
         pendingTemplate = null;
         selectedPort = null;
         draggingReference = null;
         canvas.style.cursor = '';
-        setStatus('Escala lista para ajustar. Los equipos se conservan.');
+        setStatus('Scale is ready to adjust. Equipment will be kept.');
     } else {
         cmPerPixel = 100 / gridSize;
         scaleInput.value = '1';
@@ -657,7 +722,7 @@ function resetScale() {
         updateSummary();
         if (selectedLink) showLinkInfo(selectedLink);
         if (selectedDevice) showDeviceInfo(selectedDevice);
-        setStatus('Escala restablecida a 1 m por cuadro.');
+        setStatus('Scale reset to 1 m per grid square.');
     }
     updateControls();
     updateHint();
@@ -678,6 +743,13 @@ function removePhoto() {
     // La imagen podía imponer una proporción estrecha. Al quitarla, vuelve el plano
     // al tamaño completo del área de trabajo y se conserva la escala calibrada.
     fixedPlanSize = false;
+    fixedPlanWidth = 0;
+    fixedPlanHeight = 0;
+    fixedCanvasMinWidth = 0;
+    fixedCanvasMinHeight = 0;
+    planDisplayScale = 1;
+    planImageX = 0;
+    planImageY = 0;
     canvasWrap.classList.remove('fixed-plan');
     canvas.style.width = '100%';
     canvas.style.height = '100%';
@@ -687,15 +759,15 @@ function removePhoto() {
     updateControls();
     updateHint();
     draw();
-    setStatus('Foto quitada. Los equipos, cables y escala se conservan.');
+    setStatus('Image removed. Equipment, cables and scale have been kept.');
 }
 function loadPlanImage(file) {
     if (!file) return;
     if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
-        setStatus('Elige una imagen PNG, JPG o WebP.');
+        setStatus('Choose a PNG, JPG or WebP image.');
         return;
     }
-    if (devices.length && !window.confirm('Cambiar el plano quitará los equipos y cables colocados. ¿Continuar?')) {
+    if (devices.length && !window.confirm('Changing the plan will remove the placed equipment and cables. Continue?')) {
         imageInput.value = '';
         return;
     }
@@ -705,6 +777,14 @@ function loadPlanImage(file) {
         URL.revokeObjectURL(imageUrl);
         const ratio = Math.min(1000 / image.naturalWidth, 800 / image.naturalHeight);
         backgroundImage = image;
+        fixedPlanSize = false;
+        fixedPlanWidth = 0;
+        fixedPlanHeight = 0;
+        fixedCanvasMinWidth = 0;
+        fixedCanvasMinHeight = 0;
+        planDisplayScale = 1;
+        planImageX = 0;
+        planImageY = 0;
         canvas.width = Math.max(1, Math.round(image.naturalWidth * ratio));
         canvas.height = Math.max(1, Math.round(image.naturalHeight * ratio));
         freezePlanSize();
@@ -717,8 +797,8 @@ function loadPlanImage(file) {
         selectedPort = null;
         pendingTemplate = null;
         calibration = {
-            a: { x: canvas.width * 0.25, y: canvas.height * 0.5 },
-            b: { x: canvas.width * 0.75, y: canvas.height * 0.5 },
+            a: { x: planImageX + fixedPlanWidth * 0.25, y: planImageY + fixedPlanHeight * 0.5 },
+            b: { x: planImageX + fixedPlanWidth * 0.75, y: planImageY + fixedPlanHeight * 0.5 },
             meters: null
         };
         referenceConfirmed = false;
@@ -727,17 +807,17 @@ function loadPlanImage(file) {
         linkInfo.replaceChildren();
         planControls.hidden = false;
         referenceSetup.hidden = false;
-        planStatus.textContent = 'Arrastra A y B hasta los puntos de referencia y escribe los metros.';
+        planStatus.textContent = 'Drag points A and B to the reference points and enter the distance in metres.';
         distanceInput.value = '';
         updateControls();
         updateHint();
         updateSummary();
         draw();
-        setStatus('Imagen cargada. Arrastra A y B y escribe la distancia en metros.');
+        setStatus('Image loaded. Drag points A and B and enter the distance in metres.');
     };
     image.onerror = () => {
         URL.revokeObjectURL(imageUrl);
-        setStatus('No se pudo abrir la imagen. Elige otra.');
+        setStatus('Could not open the image. Choose another one.');
     };
     image.src = imageUrl;
 }
@@ -856,25 +936,57 @@ function pointOnCanvas(event) {
     };
 }
 function freezePlanSize() {
+    if (!fixedPlanSize) {
+        fixedPlanWidth = canvas.width;
+        fixedPlanHeight = canvas.height;
+        const availableWidth = canvasWrap.clientWidth;
+        const availableHeight = canvasWrap.clientHeight;
+        planDisplayScale = availableWidth > 0 && availableHeight > 0 ?
+            Math.min(availableWidth / fixedPlanWidth, availableHeight / fixedPlanHeight) : 1;
+    }
     fixedPlanSize = true;
     canvasWrap.classList.add('fixed-plan');
     resizeCanvas();
+    if (!fixedCanvasMinWidth || !fixedCanvasMinHeight) {
+        fixedCanvasMinWidth = canvas.width;
+        fixedCanvasMinHeight = canvas.height;
+    }
 }
 function resizeCanvas() {
     if (fixedPlanSize) {
         const availableWidth = canvasWrap.clientWidth;
         const availableHeight = canvasWrap.clientHeight;
         if (availableWidth > 0 && availableHeight > 0) {
-            const fit = Math.min(availableWidth / canvas.width,
-                availableHeight / canvas.height);
+            const fit = planDisplayScale;
+            const contentRight = Math.max(fixedPlanWidth + planImageX,
+                ...devices.map(device => device.x + device.width + gridSize));
+            const contentBottom = Math.max(fixedPlanHeight + planImageY,
+                ...devices.map(device => device.y + device.height + gridSize));
+            const width = Math.max(fixedCanvasMinWidth || canvas.width,
+                Math.ceil(availableWidth / fit), Math.ceil(contentRight));
+            const height = Math.max(fixedCanvasMinHeight || canvas.height,
+                Math.ceil(availableHeight / fit), Math.ceil(contentBottom));
+            if (canvas.width !== width || canvas.height !== height) {
+                if (backgroundImage && fixedPlanWidth === canvas.width && fixedPlanHeight === canvas.height) {
+                    planImageX = (width - fixedPlanWidth) / 2;
+                    planImageY = (height - fixedPlanHeight) / 2;
+                }
+                canvas.width = width;
+                canvas.height = height;
+            }
             canvas.style.width = `${canvas.width * fit}px`;
             canvas.style.height = `${canvas.height * fit}px`;
+            canvasWrap.style.setProperty('--plan-grid-size', `${gridSize * fit}px`);
+            canvasWrap.classList.toggle('canvas-content-overflow',
+                canvas.width * fit > availableWidth + 1 || canvas.height * fit > availableHeight + 1);
         }
         draw();
         return;
     }
     canvas.style.width = '100%';
     canvas.style.height = '100%';
+    canvasWrap.classList.remove('canvas-content-overflow');
+    canvasWrap.style.setProperty('--plan-grid-size', `${gridSize}px`);
     if (canvas.clientWidth > 0 && canvas.clientHeight > 0 &&
         (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight)) {
         canvas.width = canvas.clientWidth;
@@ -884,6 +996,70 @@ function resizeCanvas() {
     }
     draw();
 }
+function resetCanvasAreaSize() {
+    canvasWrap.style.flex = '';
+    canvasWrap.style.width = '';
+    canvasWrap.style.height = '';
+    canvasWrap.closest('.workspace')?.classList.remove('canvas-area-expanded');
+    document.querySelector('.app')?.classList.remove('page-scroll-mode');
+    resizeCanvas();
+    setStatus('Plan area fitted to the available space. Scale is unchanged.');
+}
+canvasResizeHandle.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const rect = canvasWrap.getBoundingClientRect();
+    canvasResizeStart = { pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+        width: rect.width, height: rect.height };
+    canvasWrap.style.flex = 'none';
+    canvasWrap.style.width = `${rect.width}px`;
+    canvasWrap.style.height = `${rect.height}px`;
+    canvasWrap.closest('.workspace')?.classList.add('canvas-area-expanded');
+    document.querySelector('.app')?.classList.add('page-scroll-mode');
+    canvasResizeHandle.setPointerCapture(event.pointerId);
+});
+canvasResizeHandle.addEventListener('pointermove', event => {
+    if (!canvasResizeStart || event.pointerId !== canvasResizeStart.pointerId) return;
+    const width = Math.max(canvasAreaMinWidth,
+        Math.min(5000, canvasResizeStart.width + event.clientX - canvasResizeStart.x));
+    const height = Math.max(canvasAreaMinHeight,
+        Math.min(4000, canvasResizeStart.height + event.clientY - canvasResizeStart.y));
+    canvasWrap.style.width = `${width}px`;
+    canvasWrap.style.height = `${height}px`;
+    resizeCanvas();
+});
+function finishCanvasAreaResize(event) {
+    if (!canvasResizeStart || event.pointerId !== canvasResizeStart.pointerId) return;
+    canvasResizeStart = null;
+    const scaleMeters = Number((cmPerPixel * gridSize / 100).toPrecision(6));
+    setStatus(`Plan area enlarged. Scale unchanged: ${scaleMeters} m per grid square.`);
+}
+canvasResizeHandle.addEventListener('keydown', event => {
+    const directions = {
+        ArrowRight: [gridSize, 0], ArrowLeft: [-gridSize, 0],
+        ArrowDown: [0, gridSize], ArrowUp: [0, -gridSize]
+    };
+    if (event.key === 'Home') {
+        event.preventDefault();
+        resetCanvasAreaSize();
+        return;
+    }
+    const direction = directions[event.key];
+    if (!direction) return;
+    event.preventDefault();
+    const rect = canvasWrap.getBoundingClientRect();
+    canvasWrap.style.flex = 'none';
+    canvasWrap.style.width = `${Math.max(canvasAreaMinWidth,
+        Math.min(5000, rect.width + direction[0] * (event.shiftKey ? 5 : 1)))}px`;
+    canvasWrap.style.height = `${Math.max(canvasAreaMinHeight,
+        Math.min(4000, rect.height + direction[1] * (event.shiftKey ? 5 : 1)))}px`;
+    canvasWrap.closest('.workspace')?.classList.add('canvas-area-expanded');
+    document.querySelector('.app')?.classList.add('page-scroll-mode');
+    resizeCanvas();
+});
+canvasResizeHandle.addEventListener('pointerup', finishCanvasAreaResize);
+canvasResizeHandle.addEventListener('pointercancel', finishCanvasAreaResize);
+canvasResizeHandle.addEventListener('dblclick', resetCanvasAreaSize);
 function referenceMarkerRadius() {
     return Math.min(46, Math.max(14,
         14 * canvas.width / Math.max(canvas.clientWidth, 1)));
@@ -1000,21 +1176,20 @@ function drawReferenceHandles() {
 }
 function draw(showResizeHandles = true) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#14212d';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = '#555';
+    ctx.lineWidth = 0.5;
+    for (let x = 0; x < canvas.width; x += gridSize) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
+    }
+    for (let y = 0; y < canvas.height; y += gridSize) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
+    }
     if (backgroundImage) {
-        ctx.drawImage(backgroundImage, 0, 0, canvas.width, canvas.height);
+        ctx.drawImage(backgroundImage, planImageX, planImageY, fixedPlanWidth, fixedPlanHeight);
         ctx.fillStyle = 'rgba(35, 45, 55, 0.28)';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-    } else {
-        ctx.fillStyle = '#14212d';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.strokeStyle = '#555';
-        ctx.lineWidth = 0.5;
-        for (let x = 0; x < canvas.width; x += gridSize) {
-            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
-        }
-        for (let y = 0; y < canvas.height; y += gridSize) {
-            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
-        }
+        ctx.fillRect(planImageX, planImageY, fixedPlanWidth, fixedPlanHeight);
     }
     if (calibration && !referenceConfirmed) {
         ctx.beginPath();
@@ -1116,7 +1291,7 @@ function startRackDrag(group, point) {
     links.forEach(link => { link.selected = false; });
     showDeviceInfo(null);
     updateHint();
-    setStatus(`Arrastra el borde del ${group.name} para moverlo completo.`);
+    setStatus(`Drag the ${group.name} border to move the whole rack.`);
     canvas.style.cursor = 'grabbing';
     draw();
 }
@@ -1144,7 +1319,7 @@ function finishRackRename(save) {
     const saved = save && Boolean(name);
     editingRackGroup = null;
     rackNameEditor.hidden = true;
-    if (saved) setStatus(`Rack renombrado a «${name}».`);
+    if (saved) setStatus(`Rack renamed to “${name}”.`);
     draw();
 }
 function distanceToSegment(p, a, b) {
@@ -1219,8 +1394,8 @@ function adjustCableLength(link, lengthCm) {
     updateSummary();
     draw();
     setStatus(scaleChanged ?
-        `Equipo movido. La escala pasó a ${scaleInput.value} m por cuadro para que quepa.` :
-        `Equipo de destino movido a ${(lengthCm / 100).toFixed(2)} m del otro conector.`);
+        `Equipment moved. Scale changed to ${scaleInput.value} m per grid square to make it fit.` :
+        `Destination equipment moved to ${(lengthCm / 100).toFixed(2)} m from the other connector.`);
     return true;
 }
 function updateSummary() {
@@ -1230,7 +1405,7 @@ function updateSummary() {
         (group.meters === null ? 0 : group.count * group.meters), 0);
     if (links.length === 0) {
         const empty = document.createElement('p');
-        empty.textContent = 'Todavía no hay cables. Conecta 2 puertos en el plano.';
+        empty.textContent = 'No cables yet. Connect 2 ports on the plan.';
         summaryList.appendChild(empty);
     }
     for (const group of groups) {
@@ -1238,8 +1413,8 @@ function updateSummary() {
         item.className = 'summary-row';
         const name = document.createElement('span');
         name.textContent = group.internal ?
-            `${group.startType} a ${group.endType} · interno de rack, sin escala` :
-            `${group.startType} a ${group.endType} · ${group.meters.toFixed(2)} m`;
+            `${group.startType} to ${group.endType} · inside rack, not to scale` :
+            `${group.startType} to ${group.endType} · ${group.meters.toFixed(2)} m`;
         const quantity = document.createElement('strong');
         quantity.textContent = `${group.count} cable${group.count === 1 ? '' : 's'}`;
         item.append(name, quantity);
@@ -1248,8 +1423,8 @@ function updateSummary() {
     const internalCount = groups.filter(group => group.internal)
         .reduce((sum, group) => sum + group.count, 0);
     const totals = [['Cables', String(links.length)],
-        ['Longitud calculada fuera de rack', `${total.toFixed(2)} m`]];
-    if (internalCount) totals.push(['Cables internos de rack sin escala', String(internalCount)]);
+        ['Calculated length outside racks', `${total.toFixed(2)} m`]];
+    if (internalCount) totals.push(['Rack cables not to scale', String(internalCount)]);
     for (const [label, value] of totals) {
         const item = document.createElement('div');
         item.className = 'summary-row summary-total';
@@ -1265,32 +1440,32 @@ function showLinkInfo(link) {
     linkInfo.replaceChildren();
     if (!link) return;
     const title = document.createElement('h3');
-    title.textContent = 'Cable seleccionado';
+    title.textContent = 'Selected cable';
     const sourceDevice = devices.find(device => device.ports.includes(link.start));
     const targetDevice = devices.find(device => device.ports.includes(link.end));
     const ends = document.createElement('p');
-    ends.textContent = `${sourceDevice?.name ?? 'Origen'} (${link.start.type}) a ` +
-        `${targetDevice?.name ?? 'Destino'} (${link.end.type})`;
+    ends.textContent = `${sourceDevice?.name ?? 'Source'} (${link.start.type}) to ` +
+        `${targetDevice?.name ?? 'Destination'} (${link.end.type})`;
     const internal = isRackInternalLink(link);
     const plane = document.createElement('p');
-    plane.textContent = internal ? 'Cable dentro del mismo rack: el plano no representa su longitud real.' :
-        `Distancia según el plano: ${(Math.hypot(link.end.x - link.start.x,
+    plane.textContent = internal ? 'Cable inside the same rack: the plan does not show its real length.' :
+        `Distance on plan: ${(Math.hypot(link.end.x - link.start.x,
             link.end.y - link.start.y) * cmPerPixel / 100).toFixed(2)} m`;
     const explanation = document.createElement('p');
     const otherCables = links.filter(item => item !== link && targetDevice &&
         (targetDevice.ports.includes(item.start) || targetDevice.ports.includes(item.end))).length;
-    explanation.textContent = internal ? 'Su longitud se excluye de los metros calculados del proyecto.' :
-        `Al cambiarla, se moverá ${targetDevice?.name ?? 'el equipo de destino'}.` +
-        (otherCables ? ` También cambiarán ${otherCables} cable${otherCables === 1 ? '' : 's'} conectado${otherCables === 1 ? '' : 's'}.` : '');
+    explanation.textContent = internal ? 'Its length is excluded from the project total.' :
+        `Changing it will move ${targetDevice?.name ?? 'the destination equipment'}.` +
+        (otherCables ? ` ${otherCables} other connected cable${otherCables === 1 ? '' : 's'} will also change.` : '');
     const label = document.createElement('label');
     label.htmlFor = 'real-length';
-    label.textContent = 'Longitud deseada en m';
+    label.textContent = 'Required length (m)';
     const input = document.createElement('input');
     input.type = 'number'; input.id = 'real-length'; input.min = '0.01';
-    input.step = 'any'; input.placeholder = 'Introduce la longitud';
+    input.step = 'any'; input.placeholder = 'Enter the length';
     input.value = internal ? '' : (cableLength(link) / 100).toFixed(2);
     const button = document.createElement('button');
-    button.textContent = 'Mover equipo';
+    button.textContent = 'Move equipment';
     if (internal) {
         label.hidden = true;
         input.hidden = true;
@@ -1300,18 +1475,18 @@ function showLinkInfo(link) {
         const raw = input.value.trim();
         const value = Number(raw);
         if (raw === '' || !Number.isFinite(value) || value <= 0) {
-            setStatus('Introduce una longitud mayor que 0 m.');
+            setStatus('Enter a length greater than 0 m.');
             input.focus();
             return;
         }
         if (adjustCableLength(link, value * 100)) showLinkInfo(link);
         else setStatus(backgroundImage ?
-            'La longitud no cabe en la imagen con la escala calibrada.' :
-            'No hay espacio para mover el equipo en esa dirección.');
+            'That length does not fit on the image at the calibrated scale.' :
+            'There is not enough space to move the equipment in that direction.');
     });
     const remove = document.createElement('button');
     remove.className = 'danger-button';
-    remove.textContent = 'Eliminar cable';
+    remove.textContent = 'Delete cable';
     remove.addEventListener('click', () => deleteSelectedLinks());
     const actions = document.createElement('div');
     actions.className = 'detail-actions';
@@ -1323,9 +1498,9 @@ function showDeviceInfo(device) {
     if (!device) {
         if (selectedDevices.size > 1) {
             const title = document.createElement('h3');
-            title.textContent = `${selectedDevices.size} equipos seleccionados`;
+            title.textContent = `${selectedDevices.size} items selected`;
             const description = document.createElement('p');
-            description.textContent = 'Clic derecho para agruparlos como rack o eliminarlos.';
+            description.textContent = 'Right-click to group them as a rack or delete them.';
             linkInfo.append(title, description);
         }
         return;
@@ -1333,10 +1508,10 @@ function showDeviceInfo(device) {
     const title = document.createElement('h3');
     title.textContent = device.name;
     const description = document.createElement('p');
-    description.textContent = `${device.ports.length} conectores. Arrastra el equipo para moverlo o sus puntos para cambiar el tamaño. Pulsa Supr para borrarlo.`;
+    description.textContent = `${device.ports.length} connectors. Drag the equipment to move it or its handles to resize. Press Delete to remove it.`;
     const remove = document.createElement('button');
     remove.className = 'danger-button';
-    remove.textContent = 'Eliminar equipo';
+    remove.textContent = 'Delete equipment';
     remove.addEventListener('click', () => deleteDevice(device));
     linkInfo.append(title, description);
     if (device.catalogProduct?.sources?.length) {
@@ -1348,32 +1523,32 @@ function showDeviceInfo(device) {
         sourceLink.href = source;
         sourceLink.target = '_blank';
         sourceLink.rel = 'noopener noreferrer';
-        sourceLink.textContent = 'Consultar ficha del modelo';
+        sourceLink.textContent = 'View product sheet';
         linkInfo.appendChild(sourceLink);
     }
     linkInfo.appendChild(remove);
 }
 function connectPorts(start, end) {
     if (start === end) {
-        setStatus('Elige 2 conectores distintos.');
+        setStatus('Choose 2 different connectors.');
         return;
     }
     const startDevice = devices.find(device => device.ports.includes(start));
     const endDevice = devices.find(device => device.ports.includes(end));
     if (startDevice && startDevice === endDevice) {
-        setStatus('Elige conectores de 2 equipos distintos.');
+        setStatus('Choose connectors on 2 different items.');
         return;
     }
     if (links.some(link =>
         (link.start === start && link.end === end) ||
         (link.start === end && link.end === start))) {
-        setStatus('Esos conectores ya están unidos.');
+        setStatus('Those connectors are already linked.');
         return;
     }
     freezePlanSize();
     links.push({ start, end, selected: false });
     updateSummary();
-    setStatus('Cable añadido. Haz clic en la línea para indicar su longitud real.');
+    setStatus('Cable added. Click the line to enter its real length.');
 }
 function deleteSelectedLinks() {
     const count = links.filter(link => link.selected).length;
@@ -1385,7 +1560,7 @@ function deleteSelectedLinks() {
     showLinkInfo(null);
     updateSummary();
     draw();
-    setStatus(`${count} cable${count === 1 ? '' : 's'} eliminado${count === 1 ? '' : 's'}.`);
+    setStatus(`${count} cable${count === 1 ? '' : 's'} deleted.`);
 }
 function deleteDevice(device) {
     const index = devices.indexOf(device);
@@ -1410,7 +1585,7 @@ function deleteDevice(device) {
     updateSummary();
     updateHint();
     draw();
-    setStatus(`${device.name} eliminado${removedLinks ? ` con ${removedLinks} cable${removedLinks === 1 ? '' : 's'}` : ''}.`);
+    setStatus(`${device.name} deleted${removedLinks ? ` with ${removedLinks} cable${removedLinks === 1 ? '' : 's'}` : ''}.`);
 }
 function deleteSelectedDevices() {
     const targets = [...selectedDevices];
@@ -1422,7 +1597,7 @@ function deleteSelectedDevices() {
     selectedDevice = null;
     showDeviceInfo(null);
     draw();
-    setStatus(`${count} equipo${count === 1 ? '' : 's'} eliminado${count === 1 ? '' : 's'}.`);
+    setStatus(`${count} item${count === 1 ? '' : 's'} deleted.`);
     return true;
 }
 function hideContextMenu() { contextMenu.hidden = true; }
@@ -1467,7 +1642,7 @@ function openContextMenu(event) {
     rackDownMenuButton.hidden = !selectedRack || selectedIndex < 0 || selectedIndex >= selectedRack.devices.length - 1;
     rackRemoveMenuButton.hidden = !selectedRack;
     deleteMenuButton.textContent = selectedDevices.size > 1 ?
-        `Eliminar ${selectedDevices.size} equipos` : 'Eliminar equipo';
+        `Delete ${selectedDevices.size} items` : 'Delete equipment';
     const wrap = canvasWrap.getBoundingClientRect();
     contextMenu.hidden = false;
     contextMenu.style.left = `${Math.max(0, Math.min(event.clientX - wrap.left,
@@ -1480,7 +1655,7 @@ function openContextMenu(event) {
 function groupSelectedDevices() {
     const members = [...selectedDevices];
     if (members.length < 2) {
-        setStatus('Selecciona al menos 2 equipos para crear un rack.');
+        setStatus('Select at least 2 items to create a rack.');
         return;
     }
     for (const device of members) {
@@ -1494,7 +1669,7 @@ function groupSelectedDevices() {
     layoutRack(group);
     updateSummary();
     draw();
-    setStatus(`Rack creado con ${members.length} equipos apilados.`);
+    setStatus(`Rack created with ${members.length} items stacked.`);
 }
 function layoutRack(group, origin = null) {
     const members = group.devices.filter(device => devices.includes(device));
@@ -1523,7 +1698,7 @@ function moveRackMember(device, direction) {
     [group.devices[index], group.devices[target]] = [group.devices[target], group.devices[index]];
     layoutRack(group, { x: left, y: top });
     draw();
-    setStatus(`${device.name} movido ${direction < 0 ? 'hacia arriba' : 'hacia abajo'} en ${group.name}.`);
+    setStatus(`${device.name} moved ${direction < 0 ? 'up' : 'down'} in ${group.name}.`);
 }
 function removeDeviceFromRack(device) {
     const index = rackGroups.findIndex(item => item.devices.includes(device));
@@ -1534,7 +1709,7 @@ function removeDeviceFromRack(device) {
     else layoutRack(group);
     updateSummary();
     draw();
-    setStatus(`${device.name} sacado del rack.`);
+    setStatus(`${device.name} removed from rack.`);
 }
 function ungroupSelectedDevices() {
     const targets = new Set(selectedDevices);
@@ -1544,14 +1719,14 @@ function ungroupSelectedDevices() {
     }
     updateSummary();
     draw();
-    setStatus('Rack desagrupado.');
+    setStatus('Rack ungrouped.');
 }
 function createTemplate() {
     const name = deviceNameInput.value.trim();
     const count = Number(connectorCountInput.value);
-    if (!name) { setStatus('Escribe el nombre del equipo.'); deviceNameInput.focus(); return; }
+    if (!name) { setStatus('Enter an equipment name.'); deviceNameInput.focus(); return; }
     if (!Number.isInteger(count) || count < 1 || count > 16) {
-        setStatus('Indica una cantidad de 1 a 16 conectores.');
+        setStatus('Enter a number of connectors from 1 to 16.');
         connectorCountInput.focus();
         return;
     }
@@ -1560,7 +1735,7 @@ function createTemplate() {
         if (type === connectorTypeInput.value) continue;
         const extraCount = Number(entry.input.value);
         if (!Number.isInteger(extraCount) || extraCount < 0 || extraCount > 16) {
-            setStatus(`Revisa la cantidad de conectores ${type}.`);
+            setStatus(`Check the number of ${type} connectors.`);
             extraConnectorsPanel.open = true;
             entry.input.focus();
             return;
@@ -1568,7 +1743,7 @@ function createTemplate() {
         types.push(...Array(extraCount).fill(type));
     }
     if (types.length > 16) {
-        setStatus('Un equipo puede tener hasta 16 conectores en total.');
+        setStatus('An item can have up to 16 connectors in total.');
         extraConnectorsPanel.open = true;
         return;
     }
@@ -1579,12 +1754,12 @@ function createTemplate() {
     extraConnectorsPanel.open = false;
     if (backgroundImage && !referenceConfirmed) {
         pendingTemplate = null;
-        setStatus('Confirma la distancia entre A y B antes de colocar equipos.');
+        setStatus('Confirm the distance between A and B before placing equipment.');
         return;
     }
     if (pendingTemplate) {
         canvas.style.cursor = 'crosshair';
-        setStatus(`Haz clic en el plano para colocar ${pendingTemplate.name}.`);
+        setStatus(`Click on the plan to place ${pendingTemplate.name}.`);
         updateHint();
         canvas.scrollIntoView?.({ block: 'center' });
         canvas.focus?.({ preventScroll: true });
@@ -1603,7 +1778,7 @@ function renderCatalogSearch() {
     if (query.length < 2) {
         const empty = document.createElement('p');
         empty.className = 'catalog-search-empty';
-        empty.textContent = 'Escribe al menos 2 caracteres para buscar modelos con conectores disponibles.';
+        empty.textContent = 'Enter at least 2 characters to search models with available connectors.';
         catalogSearchResults.appendChild(empty);
         return;
     }
@@ -1621,7 +1796,7 @@ function renderCatalogSearch() {
     if (!matches.length) {
         const empty = document.createElement('p');
         empty.className = 'catalog-search-empty';
-        empty.textContent = 'No hay coincidencias con conectores disponibles para esa búsqueda.';
+        empty.textContent = 'No matching models with available connectors found.';
         catalogSearchResults.appendChild(empty);
         return;
     }
@@ -1629,7 +1804,7 @@ function renderCatalogSearch() {
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'catalog-result';
-        button.setAttribute('aria-label', `Añadir ${product.brand} ${product.model}, ${types.length} conectores`);
+        button.setAttribute('aria-label', `Add ${product.brand} ${product.model}, ${types.length} connectors`);
         const title = document.createElement('strong');
         title.textContent = `${product.brand} ${product.model || product.reference}`;
         const detail = document.createElement('span');
@@ -1660,18 +1835,18 @@ function findDevicePlacement(device) {
 }
 function addCatalogDevice(product, types = getCatalogConnectorTypes(product)) {
     if (!types.length) {
-        setStatus(`El catálogo no tiene conectores compatibles para ${product.model}.`);
+        setStatus(`The catalogue has no supported connectors for ${product.model}.`);
         return;
     }
     if (backgroundImage && !referenceConfirmed) {
-        setStatus('Confirma primero la escala del plano para añadir equipos del catálogo.');
+        setStatus('Confirm the plan scale before adding catalogue equipment.');
         return;
     }
     const name = `${product.brand} ${product.model || product.reference}`;
     const device = new Device(name, types, 0, 0);
     const placement = findDevicePlacement(device);
     if (!placement) {
-        setStatus(`No queda espacio en el plano para añadir ${name}.`);
+        setStatus(`There is no room on the plan to add ${name}.`);
         return;
     }
     freezePlanSize();
@@ -1685,7 +1860,7 @@ function addCatalogDevice(product, types = getCatalogConnectorTypes(product)) {
     updateHint();
     showDeviceInfo(device);
     draw();
-    setStatus(`${name} añadido al plano con ${types.length} conectores del catálogo.`);
+    setStatus(`${name} added to the plan with ${types.length} catalogue connectors.`);
 }
 function segmentIntersectsRect(a, b, r) {
     const dx = b.x - a.x, dy = b.y - a.y;
@@ -1741,7 +1916,7 @@ canvas.addEventListener('pointerdown', event => {
         draggingReference = reference;
         canvas.setPointerCapture?.(event.pointerId);
         canvas.style.cursor = 'grabbing';
-        setStatus(`Arrastra el punto ${reference.toUpperCase()} hasta la referencia del plano.`);
+        setStatus(`Drag point ${reference.toUpperCase()} to its reference on the plan.`);
         return;
     }
     if (pendingTemplate) {
@@ -1755,7 +1930,7 @@ canvas.addEventListener('pointerdown', event => {
         selectedDevice = device;
         pendingTemplate = null;
         canvas.style.cursor = '';
-        setStatus(`${device.name} colocado. Puedes arrastrarlo o conectar sus puertos.`);
+        setStatus(`${device.name} placed. You can drag it or connect its ports.`);
         showDeviceInfo(device);
         updateHint();
         draw();
@@ -1777,7 +1952,7 @@ canvas.addEventListener('pointerdown', event => {
         };
         canvas.setPointerCapture?.(event.pointerId);
         canvas.style.cursor = resizeCursor(resizeHandle);
-        setStatus('Arrastra el punto para cambiar el tamaño del equipo.');
+        setStatus('Drag the handle to resize the equipment.');
         return;
     }
     for (const device of [...devices].reverse()) {
@@ -1788,7 +1963,7 @@ canvas.addEventListener('pointerdown', event => {
             selectedPort = null;
         } else {
             selectedPort = port;
-            setStatus(`Origen: ${port.type}. Selecciona el conector de destino.`);
+            setStatus(`Source: ${port.type}. Select the destination connector.`);
         }
         selectedDevice = null;
         updateHint();
@@ -1826,7 +2001,7 @@ canvas.addEventListener('pointerdown', event => {
         links.forEach(item => { item.selected = false; });
         showDeviceInfo(device);
         updateHint();
-        setStatus(`${device.name} seleccionado. Arrástralo para moverlo o usa los puntos para cambiar el tamaño.`);
+        setStatus(`${device.name} selected. Drag it to move it or use the handles to resize it.`);
         canvas.style.cursor = 'grabbing';
         draw();
         return;
@@ -1849,7 +2024,7 @@ canvas.addEventListener('pointerdown', event => {
         selectedPort = null;
         updateHint();
         showLinkInfo(link);
-        setStatus('Cable seleccionado. Puedes cambiar su longitud o eliminarlo.');
+        setStatus('Cable selected. You can change its length or delete it.');
         draw();
         return;
     }
@@ -1891,19 +2066,19 @@ canvas.addEventListener('pointermove', event => {
         const rackBoundary = rackBoundaryAt(point);
         if (rackBoundary) {
             canvas.style.cursor = 'move';
-            setStatus(`Arrastra el borde del ${rackBoundary.name} para moverlo completo.`);
+            setStatus(`Drag the ${rackBoundary.name} border to move the whole rack.`);
             return;
         }
         const reference = referenceAt(point);
         if (reference) {
             canvas.style.cursor = 'grab';
-            setStatus(`Arrastra el punto ${reference.toUpperCase()} para ajustar la referencia.`);
+            setStatus(`Drag point ${reference.toUpperCase()} to adjust the reference.`);
             return;
         }
         const resizeHandle = selectedDevice && resizeHandleAt(selectedDevice, point);
         if (resizeHandle) {
             canvas.style.cursor = resizeCursor(resizeHandle);
-            setStatus('Arrastra este punto para cambiar el tamaño del equipo.');
+            setStatus('Drag this handle to resize the equipment.');
             return;
         }
         const device = [...devices].reverse().find(item => item.contains(point));
@@ -1911,15 +2086,15 @@ canvas.addEventListener('pointermove', event => {
         const link = !device && links.some(item =>
             distanceToSegment(point, item.start, item.end) <= 5);
         canvas.style.cursor = port || link ? 'pointer' : device ? 'grab' : '';
-        if (port) setStatus(`Conector ${port.type}. Haz clic para seleccionarlo.`);
-        else if (link) setStatus('Haz clic en el cable para editar su longitud.');
+        if (port) setStatus(`Connector ${port.type}. Click to select it.`);
+        else if (link) setStatus('Click the cable to edit its length.');
     }
 });
 function finishPointer() {
-    if (draggingReference) setStatus(`Punto ${draggingReference.toUpperCase()} colocado.`);
+    if (draggingReference) setStatus(`Point ${draggingReference.toUpperCase()} placed.`);
     if (resizingDevice) {
         showDeviceInfo(resizingDevice.device);
-        setStatus(`${resizingDevice.device.name}: tamaño actualizado.`);
+        setStatus(`${resizingDevice.device.name}: size updated.`);
     }
     if (draggingDevice) {
         const rack = selectedDevices.size === 1 && rackGroups.find(group =>
@@ -1932,18 +2107,18 @@ function finishPointer() {
             const top = Math.min(...wholeRack.devices.map(device => device.y));
             layoutRack(wholeRack, { x: left, y: top });
             showDeviceInfo(null);
-            setStatus(`${wholeRack.name} movido.`);
+            setStatus(`${wholeRack.name} moved.`);
         } else if (rack) {
             const left = Math.min(...rack.devices.map(device => device.x));
             const top = Math.min(...rack.devices.map(device => device.y));
             rack.devices.sort((a, b) => a.y - b.y || a.x - b.x);
             layoutRack(rack, { x: left, y: top });
             showDeviceInfo(draggingDevice);
-            setStatus(`${draggingDevice.name} recolocado dentro de ${rack.name}.`);
+            setStatus(`${draggingDevice.name} repositioned within ${rack.name}.`);
         } else {
             if (selectedDevices.size > 1) showDeviceInfo(null);
             else showDeviceInfo(draggingDevice);
-            setStatus(selectedDevices.size > 1 ? `${selectedDevices.size} equipos movidos.` : `${draggingDevice.name} movido.`);
+            setStatus(selectedDevices.size > 1 ? `${selectedDevices.size} items moved.` : `${draggingDevice.name} moved.`);
         }
     }
     draggingDevice = null;
@@ -1974,7 +2149,7 @@ document.addEventListener('keydown', event => {
             types: device.ports.map(port => port.type), x: device.x - minX, y: device.y - minY,
             width: device.width, height: device.height, catalogProduct: device.catalogProduct || null }));
         pasteCount = 0;
-        setStatus(`${deviceClipboard.length} equipo${deviceClipboard.length === 1 ? '' : 's'} copiado${deviceClipboard.length === 1 ? '' : 's'}.`);
+        setStatus(`${deviceClipboard.length} item${deviceClipboard.length === 1 ? '' : 's'} copied.`);
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') {
         if (!deviceClipboard.length) return;
         event.preventDefault();
@@ -1994,7 +2169,7 @@ document.addEventListener('keydown', event => {
         showDeviceInfo(selectedDevice);
         updateSummary();
         draw();
-        setStatus(`${selectedDevices.size} equipo${selectedDevices.size === 1 ? '' : 's'} pegado${selectedDevices.size === 1 ? '' : 's'}.`);
+        setStatus(`${selectedDevices.size} item${selectedDevices.size === 1 ? '' : 's'} pasted.`);
     } else if (event.key === 'Delete' && !editingText) {
         if (selectedDevices.size) deleteSelectedDevices();
         else deleteSelectedLinks();
@@ -2089,13 +2264,13 @@ scaleInput.addEventListener('change', () => {
     const value = Number(scaleInput.value);
     if (!Number.isFinite(value) || value <= 0) {
         scaleInput.value = cmPerPixel * gridSize / 100;
-        setStatus('La escala debe ser mayor que 0 m por cuadro.');
+        setStatus('Scale must be greater than 0 m per grid square.');
         return;
     }
     cmPerPixel = value * 100 / gridSize;
     updateSummary();
     if (selectedLink) showLinkInfo(selectedLink);
-    setStatus(`Escala actualizada: ${value} m por cuadro.`);
+    setStatus(`Scale updated: ${value} m per grid square.`);
 });
 if (typeof ResizeObserver !== 'undefined') {
     const canvasResizeObserver = new ResizeObserver(resizeCanvas);

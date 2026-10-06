@@ -1,19 +1,19 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en-GB">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Planificador de cables</title>
+    <title>Cable Planner</title>
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
     <div id="project-start" class="project-start" role="dialog" aria-modal="true" aria-labelledby="project-start-heading">
         <form id="project-form" class="project-card">
-            <h1 id="project-start-heading">Nuevo proyecto de cables</h1>
-            <p>Ponle un nombre para identificar el plano y el PDF.</p>
-            <label for="project-name">Nombre del proyecto</label>
-            <input id="project-name" type="text" maxlength="80" placeholder="Ej.: Auditorio principal" autocomplete="off" required autofocus>
-            <button type="submit" class="button-primary">Empezar proyecto</button>
+            <h1 id="project-start-heading">New cable project</h1>
+            <p>Name your project to identify the plan and PDF.</p>
+            <label for="project-name">Project name</label>
+            <input id="project-name" type="text" maxlength="80" placeholder="e.g. Main auditorium" autocomplete="off" required autofocus>
+            <button type="submit" class="button-primary">Start project</button>
         </form>
     </div>
     <div id="editor-shell" inert>
@@ -21,56 +21,57 @@
         <details id="file-menu" class="file-menu">
             <summary>File</summary>
             <div class="file-menu-actions">
-                <button id="import-design" type="button">Importar diseño (Excel)</button>
-                <button id="new-project" type="button">Nuevo proyecto</button>
-                <button id="save-pdf" type="button">Guardar PDF</button>
+                <button id="import-design" type="button">Import design (Excel or CSV)</button>
+                <button id="new-project" type="button">New project</button>
+                <button id="save-pdf" type="button">Save PDF</button>
             </div>
         </details>
         <span class="toolbar-separator" aria-hidden="true"></span>
-        <button id="project-title" class="project-title" type="button" title="Pulsa para cambiar el nombre">Proyecto sin nombre</button>
-        <input id="project-title-input" class="project-title-input" type="text" maxlength="80" aria-label="Nombre del proyecto" hidden>
+        <button id="project-title" class="project-title" type="button" title="Click to rename">Untitled project</button>
+        <input id="project-title-input" class="project-title-input" type="text" maxlength="80" aria-label="Project name" hidden>
     </header>
     <div class="app">
         <aside class="sidebar">
             <header class="app-heading">
-                <h1>Planificador de cables</h1>
-                <p>Coloca los equipos y conecta sus puertos para calcular los cables.</p>
+                <h1>Cable Planner</h1>
+                <p>Place equipment and connect its ports to calculate cable lengths.</p>
             </header>
 
             <section class="panel" aria-labelledby="plan-heading">
-                <h2 id="plan-heading">Plano real</h2>
-                <label for="plan-image">Imagen del plano</label>
+                <h2 id="plan-heading">Floor plan</h2>
+                <label for="plan-image">Plan image</label>
                 <input id="plan-image" type="file" accept="image/png,image/jpeg,image/webp">
-                <button id="remove-photo" type="button" class="button-secondary" hidden>Quitar foto</button>
+                <button id="remove-photo" type="button" class="button-secondary" hidden>Remove image</button>
                 <div id="plan-controls" hidden>
                     <div id="reference-setup" class="reference-setup">
-                        <p class="plan-status">Arrastra A y B sobre 2 puntos con distancia conocida.</p>
-                        <label for="reference-distance">Distancia real entre 2 puntos (m)</label>
-                        <input id="reference-distance" type="number" min="0.01" step="any" placeholder="Ej.: 5">
-                        <button id="confirm-distance" type="button" class="button-secondary" disabled>Confirmar distancia</button>
+                        <p class="plan-status">Place points A and B on 2 points with a known distance.</p>
+                        <label for="reference-distance">Real distance between points (m)</label>
+                        <input id="reference-distance" type="number" min="0.01" step="any" placeholder="e.g. 5">
+                        <button id="confirm-distance" type="button" class="button-secondary" disabled>Confirm distance</button>
                     </div>
-                    <p id="plan-status" class="plan-status">Mueve los puntos A y B y escribe la distancia en metros.</p>
+                    <p id="plan-status" class="plan-status">Move points A and B, then enter the distance in metres.</p>
                 </div>
             </section>
 
             <section class="panel catalog-search-panel" aria-labelledby="catalog-search-heading">
-                <h2 id="catalog-search-heading">Buscar equipo del catálogo</h2>
-                <label for="catalog-search">Modelo, marca o referencia</label>
-                <input id="catalog-search" type="search" placeholder="Ej.: SRX910LA o M4250" autocomplete="off">
-                <div id="catalog-search-results" class="catalog-search-results" role="region" aria-live="polite" aria-label="Resultados del catálogo">
-                    <p class="catalog-search-empty">Busca modelos con conectores disponibles en el catálogo.</p>
+                <h2 id="catalog-search-heading">Search equipment catalogue</h2>
+                <label for="catalog-search">Model, brand or part number</label>
+                <input id="catalog-search" type="search" placeholder="e.g. SRX910LA or M4250" autocomplete="off">
+                <div id="catalog-search-results" class="catalog-search-results" role="region" aria-live="polite" aria-label="Catalogue search results">
+                    <p class="catalog-search-empty">Search for models with connectors in the catalogue.</p>
                 </div>
             </section>
 
             <section class="panel" aria-labelledby="create-heading">
-                <h2 id="create-heading">Crear equipo</h2>
-                <label for="new-device-name">Nombre del equipo</label>
-                <input type="text" id="new-device-name" placeholder="Ej.: Mesa de mezclas" autocomplete="off">
-                <label for="connector-type">Conector</label>
+                <h2 id="create-heading">Add equipment</h2>
+                <label for="new-device-name">Equipment name</label>
+                <input type="text" id="new-device-name" placeholder="e.g. Mixing desk" autocomplete="off">
+                <label for="connector-type">Connector</label>
                 <select id="connector-type">
                     <option value="XLR M">XLR M</option>
                     <option value="XLR F">XLR F</option>
                     <option value="Speakon NL2">Speakon NL2</option>
+                    <option value="Speakon NL2 / 1/4 TS combo">Speakon NL2 / 1/4" TS combo</option>
                     <option value="Speakon NL4">Speakon NL4</option>
                     <option value="Speakon NL8">Speakon NL8</option>
                     <option value="1/4 TRS">1/4" TRS</option>
@@ -78,9 +79,9 @@
                     <option value="RCA">RCA</option>
                     <option value="3.5 mm">3.5 mm</option>
                     <option value="Euroblock">Euroblock</option>
-                    <option value="Phoenix 3.5 mm">Phoenix 3,5 mm</option>
-                    <option value="Phoenix 5.08 mm">Phoenix 5,08 mm</option>
-                    <option value="Bornes">Bornes de altavoz</option>
+                    <option value="Phoenix 3.5 mm">Phoenix 3.5 mm</option>
+                    <option value="Phoenix 5.08 mm">Phoenix 5.08 mm</option>
+                    <option value="Bornes">Speaker terminals</option>
                     <option value="Binding post">Binding post</option>
                     <option value="Ethercon">Ethercon</option>
                     <option value="Ethernet RJ45">Ethernet RJ45</option>
@@ -95,53 +96,57 @@
                     <option value="DMX 5-pin M">DMX 5-pin M</option>
                     <option value="DMX 5-pin F">DMX 5-pin F</option>
                 </select>
-                <label for="connector-count">Cantidad de conectores</label>
+                <label for="connector-count">Number of connectors</label>
                 <input id="connector-count" type="number" min="1" max="16" step="1" value="1">
                 <details id="extra-connectors-panel" class="extra-connectors">
-                    <summary>Otros tipos de conector</summary>
+                    <summary>Additional connector types</summary>
                     <div id="extra-connectors"></div>
                 </details>
-                <button id="create-device" type="button" class="button-primary">Crear y colocar en el plano</button>
+                <button id="create-device" type="button" class="button-primary">Create and place on plan</button>
             </section>
 
-            <section id="link-info" class="panel detail-panel" aria-label="Cable seleccionado"></section>
+            <section id="link-info" class="panel detail-panel" aria-label="Selected cable or equipment"></section>
         </aside>
 
         <main class="workspace">
             <header class="workspace-header">
                 <div>
-                    <h2>Plano de conexiones</h2>
-                    <p id="canvas-hint">Crea un equipo para empezar.</p>
+                    <h2>Connection plan</h2>
+                    <p id="canvas-hint">Add equipment to get started.</p>
                 </div>
                 <div class="scale-control">
-                    <label for="cm-per-grid">Escala del plano</label>
+                    <label for="cm-per-grid">Plan scale</label>
                     <div class="scale-input">
                         <input id="cm-per-grid" type="number" min="0.001" step="any" value="1">
-                        <span>m por cuadro</span>
+                        <span>m per grid square</span>
                     </div>
-                    <button id="reset-scale" type="button" class="button-secondary">Restablecer escala</button>
+                    <button id="reset-scale" type="button" class="button-secondary">Reset scale</button>
                 </div>
             </header>
             <div class="canvas-wrap">
-                <canvas id="canvas" tabindex="0" aria-label="Plano de equipos y cables"></canvas>
-                <div id="empty-state" class="empty-state">Crea un equipo y colócalo aquí.</div>
-                <input id="rack-name-editor" class="rack-name-editor" type="text" aria-label="Nombre del rack" autocomplete="off" hidden>
+                <canvas id="canvas" tabindex="0" aria-label="Equipment and cable plan"></canvas>
+                <button id="canvas-resize-handle" class="canvas-resize-handle" type="button"
+                    aria-label="Resize the plan area" title="Drag to enlarge. Use the arrow keys to adjust; double-click or press Home to reset.">
+                    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 16 16 4M9 16 16 9M14 16l2-2" /></svg>
+                </button>
+                <div id="empty-state" class="empty-state">Create equipment and place it here.</div>
+                <input id="rack-name-editor" class="rack-name-editor" type="text" aria-label="Rack name" autocomplete="off" hidden>
                 <div id="canvas-context-menu" class="canvas-context-menu" role="menu" hidden>
-                    <button type="button" role="menuitem" data-action="group">Agrupar como rack</button>
-                    <button type="button" role="menuitem" data-action="ungroup" hidden>Desagrupar rack</button>
-                    <button type="button" role="menuitem" data-action="rack-up" hidden>Subir en el rack</button>
-                    <button type="button" role="menuitem" data-action="rack-down" hidden>Bajar en el rack</button>
-                    <button type="button" role="menuitem" data-action="rack-remove" hidden>Sacar del rack</button>
-                    <button type="button" role="menuitem" data-action="delete" class="danger-button">Eliminar selección</button>
+                    <button type="button" role="menuitem" data-action="group">Group as rack</button>
+                    <button type="button" role="menuitem" data-action="ungroup" hidden>Ungroup rack</button>
+                    <button type="button" role="menuitem" data-action="rack-up" hidden>Move up in rack</button>
+                    <button type="button" role="menuitem" data-action="rack-down" hidden>Move down in rack</button>
+                    <button type="button" role="menuitem" data-action="rack-remove" hidden>Remove from rack</button>
+                    <button type="button" role="menuitem" data-action="delete" class="danger-button">Delete selection</button>
                 </div>
-                <div id="placement-prompt" class="placement-prompt" hidden>Haz clic en el plano para colocar el equipo. Esc cancela.</div>
+                <div id="placement-prompt" class="placement-prompt" hidden>Click on the plan to place the equipment. Press Esc to cancel.</div>
             </div>
             <div class="workspace-footer">
-                <p id="status" role="status" aria-live="polite">Listo para crear un equipo.</p>
-                <button id="cancel-action" type="button" class="button-secondary" hidden>Cancelar</button>
+                <p id="status" role="status" aria-live="polite">Ready to add equipment.</p>
+                <button id="cancel-action" type="button" class="button-secondary" hidden>Cancel</button>
             </div>
             <section class="summary" aria-labelledby="summary-heading">
-                <h2 id="summary-heading">Cables necesarios</h2>
+                <h2 id="summary-heading">Required cables</h2>
                 <div id="summary-list" class="summary-content"></div>
             </section>
         </main>
@@ -152,22 +157,22 @@
         <div class="import-preview-panel">
             <header class="import-preview-header">
                 <div>
-                    <h2 id="import-preview-title">Importar diseño</h2>
-                    <p id="import-preview-summary">Revisa los modelos antes de colocarlos.</p>
+                    <h2 id="import-preview-title">Import design</h2>
+                    <p id="import-preview-summary">Review the models before placing them.</p>
                 </div>
-                <button id="cancel-import" class="icon-button" type="button" aria-label="Cerrar">×</button>
+                <button id="cancel-import" class="icon-button" type="button" aria-label="Close">×</button>
             </header>
             <div class="import-preview-table-wrap">
                 <table class="import-preview-table">
                     <thead>
-                        <tr><th>Importar</th><th>Modelo</th><th>Cantidad</th><th>Conectores detectados</th><th>Estado</th></tr>
+                        <tr><th>Import</th><th>Model</th><th>Quantity</th><th>Detected connectors</th><th>Status</th></tr>
                     </thead>
                     <tbody id="import-preview-rows"></tbody>
                 </table>
             </div>
             <footer class="import-preview-footer">
                 <span id="import-preview-note" role="status"></span>
-                <button id="confirm-import" class="button-primary" type="button" disabled>Importar equipos</button>
+                <button id="confirm-import" class="button-primary" type="button" disabled>Import equipment</button>
             </footer>
         </div>
     </dialog>

@@ -110,8 +110,17 @@ button { display: block; min-height: 42px; padding: 9px 13px; border-radius: 5px
 .scale-input { display: flex; align-items: center; gap: 8px; }
 .scale-input input { width: 78px; }
 .scale-input span { color: #b9cad5; white-space: nowrap; font-size: 13px; }
-#reset-scale { width: 100%; margin-top: 10px; }
-.canvas-wrap { position: relative; display: flex; align-items: center; justify-content: center; flex: 1 1 auto; min-height: 0; border: 1px solid #506778; border-radius: 7px; overflow: hidden; background: #14212d; }
+#reset-scale { width: auto; min-height: 32px; margin-top: 8px; padding: 6px 9px; font-size: 12px; }
+.canvas-wrap { position: relative; display: flex; align-items: center; justify-content: center; flex: 1 1 auto; min-height: 0; border: 1px solid #506778; border-radius: 7px; overflow: hidden; background-color: #14212d; background-image: linear-gradient(to right, #ffffff0d 1px, transparent 1px), linear-gradient(to bottom, #ffffff0d 1px, transparent 1px); background-size: var(--plan-grid-size, 20px) var(--plan-grid-size, 20px); background-position: center center; }
+.canvas-wrap.canvas-content-overflow { overflow: auto; align-items: flex-start; justify-content: flex-start; }
+.app.page-scroll-mode { height: auto; min-height: calc(100vh - 46px); min-height: calc(100dvh - 46px); }
+.workspace.canvas-area-expanded { min-height: calc(100vh - 46px); min-height: calc(100dvh - 46px); overflow: visible; }
+.workspace.canvas-area-expanded .workspace-footer,
+.workspace.canvas-area-expanded .summary { flex-shrink: 0; }
+.workspace.canvas-area-expanded .summary { max-height: none; overflow: visible; }
+.canvas-resize-handle { position: absolute; z-index: 7; right: 3px; bottom: 3px; display: grid; place-items: center; width: 29px; min-width: 29px; height: 29px; min-height: 29px; padding: 4px; color: #dce8ee; background: #203747eF; border: 1px solid #8ca5b3; border-radius: 5px; cursor: nwse-resize; touch-action: none; }
+.canvas-resize-handle:hover { color: #f6b85d; background: #2d485a; }
+.canvas-resize-handle svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 1.8; pointer-events: none; }
 .canvas-context-menu {
     position: absolute;
     z-index: 5;
