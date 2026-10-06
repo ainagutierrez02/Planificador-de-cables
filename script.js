@@ -1,6 +1,5 @@
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
-const deviceSelect = document.getElementById('device-select');
 const deviceNameInput = document.getElementById('new-device-name');
 const connectorTypeInput = document.getElementById('connector-type');
 const connectorCountInput = document.getElementById('connector-count');
@@ -24,7 +23,16 @@ const distanceInput = document.getElementById('reference-distance');
 const confirmDistanceButton = document.getElementById('confirm-distance');
 const planStatus = document.getElementById('plan-status');
 const createDeviceButton = document.getElementById('create-device');
-const addDeviceButton = document.getElementById('add-device');
+const catalogSearchInput = document.getElementById('catalog-search');
+const catalogSearchResults = document.getElementById('catalog-search-results');
+const rackNameEditor = document.getElementById('rack-name-editor');
+const contextMenu = document.getElementById('canvas-context-menu');
+const groupMenuButton = contextMenu.querySelector('[data-action="group"]');
+const ungroupMenuButton = contextMenu.querySelector('[data-action="ungroup"]');
+const rackUpMenuButton = contextMenu.querySelector('[data-action="rack-up"]');
+const rackDownMenuButton = contextMenu.querySelector('[data-action="rack-down"]');
+const rackRemoveMenuButton = contextMenu.querySelector('[data-action="rack-remove"]');
+const deleteMenuButton = contextMenu.querySelector('[data-action="delete"]');
 const projectStart = document.getElementById('project-start');
 const projectForm = document.getElementById('project-form');
 const projectNameInput = document.getElementById('project-name');
@@ -34,12 +42,27 @@ const editorShell = document.getElementById('editor-shell');
 const fileMenu = document.getElementById('file-menu');
 const newProjectButton = document.getElementById('new-project');
 const savePdfButton = document.getElementById('save-pdf');
+const importDesignButton = document.getElementById('import-design');
+const designImportFile = document.getElementById('design-import-file');
+const importPreview = document.getElementById('import-preview');
+const importPreviewRows = document.getElementById('import-preview-rows');
+const importPreviewSummary = document.getElementById('import-preview-summary');
+const importPreviewNote = document.getElementById('import-preview-note');
+const confirmImportButton = document.getElementById('confirm-import');
+const cancelImportButton = document.getElementById('cancel-import');
+const harmanProductCatalog = Array.isArray(window.HARMAN_PRODUCT_CATALOG) ?
+    window.HARMAN_PRODUCT_CATALOG : [];
 const gridSize = 20;
 let cmPerPixel = 100 / gridSize; // Sin imagen: 1 cuadrícula = 1 m.
 let projectName = '';
 const devices = [];
-const templates = [];
 const links = []; // 1 entrada por cable.
+const selectedDevices = new Set();
+const rackGroups = [];
+let nextRackNumber = 1;
+let deviceClipboard = [];
+let pasteCount = 0;
+let editingRackGroup = null;
 let selectedPort = null;
 let selectedLink = null;
 let selectedDevice = null;
@@ -52,12 +75,12 @@ let fixedPlanSize = false;
 let calibration = null;
 let referenceConfirmed = false;
 let draggingReference = null;
+let pendingExcelImport = [];
 
 function setStatus(message) { status.textContent = message; }
 function updateControls() {
     const needsReference = backgroundImage && !referenceConfirmed;
     createDeviceButton.disabled = Boolean(needsReference);
-    addDeviceButton.disabled = templates.length === 0 || Boolean(needsReference);
     confirmDistanceButton.disabled = !calibration?.meters || referenceConfirmed;
     scaleInput.disabled = Boolean(backgroundImage);
     removePhotoButton.hidden = !backgroundImage;
@@ -107,14 +130,18 @@ function finishProjectRename(save) {
 }
 function newProject() {
     fileMenu.open = false;
-    if ((devices.length || templates.length || links.length || backgroundImage) &&
+    hideContextMenu();
+    if ((devices.length || links.length || backgroundImage) &&
         !window.confirm('Crear un proyecto nuevo borrará el plano actual sin guardarlo. ¿Continuar?')) return;
     projectName = '';
     projectTitle.textContent = 'Proyecto sin nombre';
     projectTitleInput.hidden = true;
     projectTitle.hidden = false;
     devices.length = 0;
-    templates.length = 0;
+    selectedDevices.clear();
+    rackGroups.length = 0;
+    finishRackRename(false);
+    nextRackNumber = 1;
     links.length = 0;
     selectedPort = null;
     selectedLink = null;
@@ -136,12 +163,6 @@ function newProject() {
     connectorCountInput.value = '1';
     for (const entry of extraConnectorInputs.values()) entry.input.value = '0';
     extraConnectorsPanel.open = false;
-    const placeholder = document.createElement('option');
-    placeholder.value = '';
-    placeholder.textContent = 'Crea un equipo primero';
-    deviceSelect.replaceChildren(placeholder);
-    deviceSelect.value = '';
-    deviceSelect.disabled = true;
     planControls.hidden = true;
     referenceSetup.hidden = false;
     canvasWrap.classList.remove('fixed-plan');
@@ -179,6 +200,339 @@ function saveProjectPdf() {
         draw();
     }
 }
+function normalizeCatalogKey(value) {
+    return String(value ?? '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+function normalizeZipPath(basePath, target) {
+    const parts = target.startsWith('/') ? [] : basePath.split('/').slice(0, -1);
+    for (const part of target.replace(/^\//, '').split('/')) {
+        if (!part || part === '.') continue;
+        if (part === '..') parts.pop();
+        else parts.push(part);
+    }
+    return parts.join('/');
+}
+async function readXlsxEntries(file) {
+    const buffer = await file.arrayBuffer();
+    const view = new DataView(buffer);
+    const decoder = new TextDecoder();
+    let endRecord = -1;
+    for (let offset = buffer.byteLength - 22;
+        offset >= Math.max(0, buffer.byteLength - 65557); offset--) {
+        if (view.getUint32(offset, true) === 0x06054b50) {
+            endRecord = offset;
+            break;
+        }
+    }
+    if (endRecord < 0) throw new Error('El archivo no tiene una estructura XLSX válida.');
+    const entriesCount = view.getUint16(endRecord + 10, true);
+    let directoryOffset = view.getUint32(endRecord + 16, true);
+    const entries = new Map();
+    for (let i = 0; i < entriesCount; i++) {
+        if (view.getUint32(directoryOffset, true) !== 0x02014b50) {
+            throw new Error('No se pudo leer el contenido del Excel.');
+        }
+        const flags = view.getUint16(directoryOffset + 8, true);
+        const method = view.getUint16(directoryOffset + 10, true);
+        const compressedSize = view.getUint32(directoryOffset + 20, true);
+        const nameLength = view.getUint16(directoryOffset + 28, true);
+        const extraLength = view.getUint16(directoryOffset + 30, true);
+        const commentLength = view.getUint16(directoryOffset + 32, true);
+        const localOffset = view.getUint32(directoryOffset + 42, true);
+        const name = decoder.decode(new Uint8Array(buffer, directoryOffset + 46, nameLength));
+        directoryOffset += 46 + nameLength + extraLength + commentLength;
+        if (name.endsWith('/')) continue;
+        if (flags & 1) throw new Error('El Excel está protegido con contraseña.');
+        const localNameLength = view.getUint16(localOffset + 26, true);
+        const localExtraLength = view.getUint16(localOffset + 28, true);
+        const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
+        const compressed = buffer.slice(dataOffset, dataOffset + compressedSize);
+        let contents;
+        if (method === 0) contents = compressed;
+        else if (method === 8 && typeof DecompressionStream !== 'undefined') {
+            const stream = new Blob([compressed]).stream()
+                .pipeThrough(new DecompressionStream('deflate-raw'));
+            contents = await new Response(stream).arrayBuffer();
+        } else throw new Error('No se puede descomprimir este Excel en este navegador.');
+        entries.set(name, new TextDecoder('utf-8').decode(contents));
+    }
+    return entries;
+}
+function parseWorksheetXml(xmlText, sharedStrings) {
+    const xml = new DOMParser().parseFromString(xmlText, 'application/xml');
+    if (xml.querySelector('parsererror')) throw new Error('Una hoja del Excel está dañada.');
+    const grid = [];
+    for (const row of xml.getElementsByTagName('row')) {
+        const rowIndex = Math.max(0, Number(row.getAttribute('r') || grid.length + 1) - 1);
+        const values = grid[rowIndex] ?? [];
+        for (const cell of row.getElementsByTagName('c')) {
+            const ref = cell.getAttribute('r') || '';
+            const letters = ref.match(/^[A-Z]+/i)?.[0] || '';
+            const column = [...letters.toUpperCase()].reduce((number, letter) =>
+                number * 26 + letter.charCodeAt(0) - 64, 0) - 1;
+            const type = cell.getAttribute('t');
+            const value = cell.getElementsByTagName('v')[0]?.textContent ?? '';
+            if (type === 's') values[column] = sharedStrings[Number(value)] ?? '';
+            else if (type === 'inlineStr') {
+                values[column] = [...cell.getElementsByTagName('t')]
+                    .map(part => part.textContent ?? '').join('');
+            } else values[column] = value;
+        }
+        grid[rowIndex] = values;
+    }
+    return grid;
+}
+function findExcelModelColumn(grid) {
+    const normalizeHeader = value => normalizeCatalogKey(value);
+    const scanRows = Math.min(grid.length, 60);
+    for (let rowIndex = 0; rowIndex < scanRows; rowIndex++) {
+        const headers = grid[rowIndex] ?? [];
+        let modelColumn = headers.findIndex(value => normalizeHeader(value) === 'modelo');
+        if (modelColumn < 0) modelColumn = headers.findIndex(value =>
+            ['model', 'modeloequipo', 'modelodeequipo'].includes(normalizeHeader(value)));
+        if (modelColumn < 0) continue;
+        const findColumn = names => headers.findIndex(value => names.includes(normalizeHeader(value)));
+        return {
+            headerRow: rowIndex,
+            modelColumn,
+            quantityColumn: findColumn(['cantidad', 'qty', 'quantity', 'unidades', 'ud', 'uds']),
+            brandColumn: findColumn(['marca', 'brand', 'fabricante']),
+            nameColumn: findColumn(['nombre', 'equipo', 'nombreequipo', 'denominacion', 'producto'])
+        };
+    }
+    return null;
+}
+async function readExcelModelRows(file) {
+    const entries = await readXlsxEntries(file);
+    const workbookXml = entries.get('xl/workbook.xml');
+    const relationsXml = entries.get('xl/_rels/workbook.xml.rels');
+    if (!workbookXml || !relationsXml) throw new Error('No se encontraron las hojas del Excel.');
+    const workbook = new DOMParser().parseFromString(workbookXml, 'application/xml');
+    const relations = new DOMParser().parseFromString(relationsXml, 'application/xml');
+    const relationTargets = new Map([...relations.getElementsByTagName('Relationship')]
+        .map(relation => [relation.getAttribute('Id'), relation.getAttribute('Target')]));
+    const sharedXml = entries.get('xl/sharedStrings.xml');
+    const sharedDocument = sharedXml ? new DOMParser().parseFromString(sharedXml, 'application/xml') : null;
+    const sharedStrings = sharedDocument ? [...sharedDocument.getElementsByTagName('si')]
+        .map(item => [...item.getElementsByTagName('t')]
+            .map(part => part.textContent ?? '').join('')) : [];
+    for (const sheet of workbook.getElementsByTagName('sheet')) {
+        const relationId = sheet.getAttribute('r:id') ||
+            sheet.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'id');
+        const target = relationTargets.get(relationId);
+        if (!target) continue;
+        const sheetPath = normalizeZipPath('xl/workbook.xml', target);
+        const sheetXml = entries.get(sheetPath);
+        if (!sheetXml) continue;
+        const grid = parseWorksheetXml(sheetXml, sharedStrings);
+        const columns = findExcelModelColumn(grid);
+        if (!columns) continue;
+        const rows = [];
+        for (let i = columns.headerRow + 1; i < grid.length; i++) {
+            const cells = grid[i] ?? [];
+            const model = String(cells[columns.modelColumn] ?? '').trim();
+            if (!model) continue;
+            const rawQuantity = columns.quantityColumn < 0 ? 1 :
+                Number(String(cells[columns.quantityColumn] ?? '').replace(',', '.'));
+            const quantity = Number.isSafeInteger(rawQuantity) && rawQuantity > 0 && rawQuantity <= 50 ?
+                rawQuantity : null;
+            rows.push({
+                model,
+                quantity,
+                brand: columns.brandColumn < 0 ? '' : String(cells[columns.brandColumn] ?? '').trim(),
+                name: columns.nameColumn < 0 ? '' : String(cells[columns.nameColumn] ?? '').trim(),
+                rowNumber: i + 1
+            });
+        }
+        return { sheetName: sheet.getAttribute('name') || 'Hoja', rows };
+    }
+    throw new Error('No encuentro una columna «Modelo» en las primeras 60 filas.');
+}
+function findCatalogProduct(model, brand) {
+    const key = normalizeCatalogKey(model);
+    if (!key) return { status: 'empty', product: null };
+    let candidates = harmanProductCatalog.filter(product => {
+        const keys = [product.reference, product.model, product.title].map(normalizeCatalogKey);
+        const brandPrefixes = product.brand === 'JBL Professional' ? ['jbl', 'jblprofessional'] :
+            product.brand === 'Crown' ? ['crown'] : product.brand === 'NETGEAR' ? ['netgear'] :
+            product.brand === 'BSS' || product.brand === 'BSS Audio' ? ['bss', 'omni', 'soundweb'] : [];
+        const netgearSku = product.brand === 'NETGEAR' &&
+            key.startsWith(`ing${normalizeCatalogKey(product.reference)}`);
+        return keys.includes(key) || netgearSku || keys.some(catalogKey =>
+            brandPrefixes.some(prefix => key === prefix + catalogKey));
+    });
+    const brandKey = normalizeCatalogKey(brand);
+    if (brandKey && candidates.length) {
+        const byBrand = candidates.filter(product =>
+            normalizeCatalogKey(product.brand).includes(brandKey) || brandKey.includes(normalizeCatalogKey(product.brand)));
+        if (byBrand.length) candidates = byBrand;
+    }
+    if (candidates.length === 1) return { status: 'exact', product: candidates[0] };
+    if (candidates.length > 1) return { status: 'ambiguous', product: null };
+    const partial = harmanProductCatalog.filter(product => {
+        const ref = normalizeCatalogKey(product.reference);
+        const productModel = normalizeCatalogKey(product.model);
+        return ref.length >= 5 && (key.includes(ref) || productModel.length >= 5 && key.includes(productModel));
+    });
+    return partial.length === 1 ? { status: 'partial', product: partial[0] } :
+        { status: partial.length ? 'ambiguous' : 'missing', product: null };
+}
+function buildImportPreviewRows(excelRows) {
+    return excelRows.map(row => {
+        const match = findCatalogProduct(row.model, row.brand);
+        const product = match.product;
+        const connectorTypes = product?.connectors?.flatMap(connector =>
+            connectorMap[connector.type] ? Array(connector.count).fill(connector.type) : []) ?? [];
+        const hasUnmappedConnector = /\bHDMI\b/i
+            .test(product?.evidence ?? '');
+        const validConnectors = connectorTypes.length > 0 && connectorTypes.length <= 64 && !hasUnmappedConnector;
+        const ready = match.status === 'exact' && row.quantity !== null && validConnectors;
+        const canManuallyImport = !ready && match.status === 'partial' && row.quantity !== null && validConnectors;
+        const reason = !row.quantity ? 'Revisa la cantidad' : match.status === 'missing' ?
+            'Modelo fuera del catálogo' : match.status === 'ambiguous' ? 'Modelo ambiguo' :
+            match.status === 'partial' ? 'Coincidencia aproximada' :
+            hasUnmappedConnector ? 'Revisa conectores en la ficha' :
+            !connectorTypes.length ? 'Faltan datos de conectores' : connectorTypes.length > 64 ?
+            'Más de 64 conectores' : 'Encontrado en catálogo';
+        return { ...row, product, connectorTypes, ready, canManuallyImport, reason };
+    });
+}
+function updateImportSelection() {
+    const selected = [...importPreviewRows.querySelectorAll('.import-row-select:checked')]
+        .reduce((count, input) => count + (pendingExcelImport[Number(input.dataset.index)]?.quantity ?? 0), 0);
+    const reviewCount = pendingExcelImport.filter(row => !row.ready).length;
+    confirmImportButton.disabled = selected === 0;
+    confirmImportButton.textContent = selected ? `Importar ${selected} equipos` : 'Importar equipos';
+    importPreviewNote.textContent = reviewCount ?
+        `${reviewCount} fila${reviewCount === 1 ? '' : 's'} requieren revisión. Marca la casilla de una coincidencia aproximada si confirmas el modelo.` :
+        'Los equipos se colocarán en el plano. El Excel no define las conexiones entre ellos.';
+}
+function showExcelImportPreview(sheetName, rows) {
+    pendingExcelImport = buildImportPreviewRows(rows);
+    importPreviewRows.replaceChildren();
+    const readyCount = pendingExcelImport.filter(row => row.ready)
+        .reduce((count, row) => count + row.quantity, 0);
+    importPreviewSummary.textContent = `${rows.length} filas de «${sheetName}». ${readyCount} equipos listos para importar.`;
+    pendingExcelImport.forEach((row, index) => {
+        const tr = document.createElement('tr');
+        const selectCell = document.createElement('td');
+        if (row.ready || row.canManuallyImport) {
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = row.ready;
+            checkbox.className = 'import-row-select';
+            checkbox.dataset.index = String(index);
+            checkbox.setAttribute('aria-label', row.canManuallyImport ?
+                `Confirmar la coincidencia aproximada de ${row.model} con ${row.product.model} e importar` :
+                `Importar ${row.model}`);
+            if (row.canManuallyImport) checkbox.title = `Confirma que ${row.model} corresponde a ${row.product.model}`;
+            checkbox.addEventListener('change', updateImportSelection);
+            selectCell.appendChild(checkbox);
+        } else selectCell.textContent = '—';
+        const modelCell = document.createElement('td');
+        modelCell.textContent = row.name || row.model;
+        if (row.product) {
+            const detail = document.createElement('div');
+            detail.className = 'tiny muted';
+            detail.textContent = `${row.product.brand} · ${row.product.model}`;
+            modelCell.appendChild(detail);
+        }
+        const quantityCell = document.createElement('td');
+        quantityCell.textContent = row.quantity === null ? 'Revisar' : String(row.quantity);
+        const connectorCell = document.createElement('td');
+        const connectorCounts = row.connectorTypes.reduce((counts, type) => {
+            counts.set(type, (counts.get(type) ?? 0) + 1);
+            return counts;
+        }, new Map());
+        connectorCell.textContent = connectorCounts.size ? [...connectorCounts]
+            .map(([type, count]) => `${type} × ${count}`).join(' · ') : 'Sin datos';
+        if (row.product?.evidence) connectorCell.title = row.product.evidence;
+        const stateCell = document.createElement('td');
+        stateCell.textContent = row.reason;
+        stateCell.className = row.ready ? 'import-state-ready' : 'import-state-review';
+        if (row.canManuallyImport) stateCell.title = 'Marca la casilla de esta fila si confirmas que el modelo sugerido es correcto.';
+        if (row.product?.sources?.length) {
+            const sourceLink = document.createElement('a');
+            sourceLink.className = 'import-source-link';
+            sourceLink.href = row.product.sources.find(source => source.includes('jblpro.com') ||
+                source.includes('crownaudio.com') || source.includes('bssaudio.com')) || row.product.sources[0];
+            sourceLink.target = '_blank';
+            sourceLink.rel = 'noopener noreferrer';
+            sourceLink.textContent = 'Ficha';
+            sourceLink.style.marginLeft = '7px';
+            stateCell.appendChild(sourceLink);
+        }
+        tr.append(selectCell, modelCell, quantityCell, connectorCell, stateCell);
+        importPreviewRows.appendChild(tr);
+    });
+    updateImportSelection();
+    importPreview.showModal();
+}
+function importSelectedExcelRows() {
+    if (backgroundImage && !referenceConfirmed) {
+        importPreview.close();
+        setStatus('Confirma primero la escala del plano para importar equipos.');
+        return;
+    }
+    const selected = [...importPreviewRows.querySelectorAll('.import-row-select:checked')]
+        .map(input => pendingExcelImport[Number(input.dataset.index)]).filter(Boolean);
+    if (!selected.length) return;
+    const total = selected.reduce((count, row) => count + row.quantity, 0);
+    if (devices.length && !window.confirm(`Se añadirán ${total} equipos al plano actual. ¿Continuar?`)) return;
+    freezePlanSize();
+    const margin = 24;
+    const columnStep = Math.max(190, ...selected.map(row => {
+        const count = row.connectorTypes.length;
+        const portWidth = count > 16 ? 12 * 24 + 20 : Math.max(140, count * 35 - 15 + 20);
+        const displayName = row.name || `${row.product.brand} ${row.product.model}`;
+        return Math.max(portWidth, displayName.length * 8 + 12) + 28;
+    }));
+    const rowStep = Math.max(78, ...selected.map(row => row.connectorTypes.length > 16 ?
+        58 + 22 * Math.ceil(row.connectorTypes.length / 12) : 78));
+    const columns = Math.max(1, Math.floor((canvas.width - margin * 2) / columnStep));
+    let itemIndex = devices.length;
+    for (const row of selected) {
+        for (let copy = 0; copy < row.quantity; copy++) {
+            const x = margin + (itemIndex % columns) * columnStep;
+            const y = margin + Math.floor(itemIndex / columns) * rowStep;
+            const displayName = row.name || `${row.product.brand} ${row.product.model}`;
+            const name = row.quantity > 1 ? `${displayName} ${copy + 1}` : displayName;
+            const device = new Device(name, row.connectorTypes, x, y);
+            device.catalogProduct = row.product;
+            devices.push(device);
+            itemIndex++;
+        }
+    }
+    const skipped = pendingExcelImport.filter(row => !row.ready && !selected.includes(row)).length;
+    importPreview.close();
+    fileMenu.open = false;
+    pendingExcelImport = [];
+    updateSummary();
+    updateHint();
+    draw();
+    setStatus(`${total} equipos importados${skipped ? `. ${skipped} filas necesitan revisión` : ''}.`);
+}
+async function handleExcelImport(file) {
+    if (!file) return;
+    fileMenu.open = false;
+    if (!file.name.toLowerCase().endsWith('.xlsx')) {
+        setStatus('Elige un archivo Excel .xlsx. Los archivos .xls antiguos no son compatibles.');
+        return;
+    }
+    if (!harmanProductCatalog.length) {
+        setStatus('No se pudo cargar el catálogo local de equipos.');
+        return;
+    }
+    try {
+        setStatus('Leyendo el Excel y buscando modelos en el catálogo…');
+        const workbook = await readExcelModelRows(file);
+        if (!workbook.rows.length) throw new Error('La columna «Modelo» no contiene equipos.');
+        showExcelImportPreview(workbook.sheetName, workbook.rows);
+    } catch (error) {
+        setStatus(`No se pudo importar el Excel: ${error.message}`);
+    }
+}
 function updateHint() {
     emptyState.hidden = devices.length > 0 || Boolean(backgroundImage);
     placementPrompt.hidden = !pendingTemplate;
@@ -190,8 +544,9 @@ function updateHint() {
             'Confirma la distancia para ocultar A y B.' :
             'Arrastra A y B y escribe su distancia real en metros.' :
         devices.length === 0 ? 'Crea un equipo para empezar.' :
-        selectedDevice ? 'Arrastra los puntos para cambiar el tamaño. Pulsa Supr para borrar el equipo.' :
-        'Arrastra equipos para moverlos. Haz clic en 2 conectores para crear un cable.';
+        selectedDevices.size > 1 ? 'Equipos seleccionados: clic derecho para agruparlos como rack o eliminarlos. Ctrl+C y Ctrl+V copia y pega.' :
+        selectedDevice ? 'Arrastra los puntos para cambiar el tamaño. Pulsa Supr para borrar. Ctrl+C copia el equipo.' :
+        'Arrastra para seleccionar varios equipos. Ctrl o Mayús + clic añade equipos. Clic derecho abre acciones.';
 }
 function cancelAction() {
     pendingTemplate = null;
@@ -208,7 +563,15 @@ const connectorMap = {
     'XLR M': ['#0000FF', 'X'], 'XLR F': ['#ADD8E6', 'X'],
     'Speakon NL2': ['#008080', 'S'], 'Speakon NL4': ['#008080', 'S'],
     'Speakon NL8': ['#008080', 'S'], '1/4 TRS': ['#7D64B0', 'T'],
-    Ethercon: ['#FFA500', 'E'], Powercon: ['#B32D2D', 'P'],
+    'XLR Combo': ['#42a5f5', 'C'], RCA: ['#8bc34a', 'R'],
+    '3.5 mm': ['#b0bec5', 'A'], Euroblock: ['#e0a85b', 'E'],
+    'Phoenix 3.5 mm': ['#e0a85b', 'E'], 'Phoenix 5.08 mm': ['#e0a85b', 'E'],
+    'USB-A': ['#90a4ae', 'U'], 'USB-C': ['#90a4ae', 'U'],
+    Bornes: ['#d2a679', 'B'], 'Binding post': ['#ef6c5b', 'B'],
+    Ethercon: ['#FFA500', 'E'], 'Ethernet RJ45': ['#55c6a9', 'R'],
+    'SFP/SFP+': ['#a58ad4', 'F'], QSFP28: ['#cc80ae', 'Q'],
+    BNC: ['#d3a64b', 'B'],
+    Powercon: ['#B32D2D', 'P'],
     'DMX 3-pin M': ['#61A357', 'D'], 'DMX 3-pin F': ['#61A357', 'D'],
     'DMX 5-pin M': ['#61A357', 'D'], 'DMX 5-pin F': ['#61A357', 'D']
 };
@@ -346,6 +709,8 @@ function loadPlanImage(file) {
         canvas.height = Math.max(1, Math.round(image.naturalHeight * ratio));
         freezePlanSize();
         devices.length = 0;
+        selectedDevices.clear();
+        rackGroups.length = 0;
         links.length = 0;
         selectedDevice = null;
         selectedLink = null;
@@ -385,20 +750,39 @@ class Device {
         this.ports = types.map(type => ({ type, x: 0, y: 0 }));
         const portSpan = this.ports.length * 20 + Math.max(0, this.ports.length - 1) * 15;
         this.minWidth = Math.max(64, portSpan + 12);
-        this.minHeight = 26;
-        this.width = Math.max(140, portSpan + 20, name.length * 8 + 12);
-        this.height = 40;
+        this.multiRowPorts = this.ports.length > 16;
+        this.portColumns = this.multiRowPorts ? 12 : Math.max(1, this.ports.length);
+        this.portRows = Math.ceil(this.ports.length / this.portColumns);
+        this.minWidth = this.multiRowPorts ? this.portColumns * 24 + 20 : Math.max(64, portSpan + 12);
+        this.minHeight = this.multiRowPorts ? 34 + this.portRows * 22 : 48;
+        this.width = Math.max(140, this.multiRowPorts ? this.minWidth : portSpan + 20, name.length * 8 + 12);
+        this.height = this.multiRowPorts ? this.minHeight : 52;
         this.baseWidth = this.width;
         this.baseHeight = this.height;
         this.move(x, y);
     }
     positionPorts() {
-        const span = this.ports.length * 20 + Math.max(0, this.ports.length - 1) * 15;
-        const left = this.x + (this.width - span) / 2;
+        const scale = this.portScale();
+        const span = (this.ports.length * 20 + Math.max(0, this.ports.length - 1) * 15) * scale;
+        const columns = this.multiRowPorts ? this.portColumns : Math.max(1, this.ports.length);
         this.ports.forEach((port, i) => {
-            port.x = left + i * 35 + 10;
-            port.y = this.y + this.height / 2;
+            if (this.multiRowPorts) {
+                const row = Math.floor(i / columns);
+                const rowStart = row * columns;
+                const rowCount = Math.min(columns, this.ports.length - rowStart);
+                const left = this.x + (this.width - rowCount * 24 * scale) / 2;
+                port.x = left + (i - rowStart) * 24 * scale + 12 * scale;
+                port.y = this.y + this.height - 12 * scale - row * 22 * scale;
+            } else {
+                const left = this.x + (this.width - span) / 2;
+                port.x = left + i * 35 * scale + 10 * scale;
+                port.y = this.y + this.height - 12 * scale;
+            }
         });
+    }
+    portScale() {
+        return Math.max(0.5, Math.min(4,
+            Math.sqrt((this.width / this.baseWidth) * (this.height / this.baseHeight))));
     }
     move(x, y) {
         if (backgroundImage) { this.moveExact(x, y); return; }
@@ -418,27 +802,38 @@ class Device {
             p.y >= this.y && p.y <= this.y + this.height;
     }
     portAt(p) {
-        return this.ports.find(port => Math.hypot(port.x - p.x, port.y - p.y) <= 10);
+        const displayScale = canvas.clientWidth / Math.max(canvas.width, 1);
+        const reach = Math.max(10 * this.portScale(), 12 / Math.max(displayScale, 0.001));
+        return this.ports.find(port => Math.hypot(port.x - p.x, port.y - p.y) <= reach);
     }
     draw() {
-        ctx.fillStyle = this === selectedDevice ? '#287e99' : '#008cba';
+        ctx.fillStyle = selectedDevices.has(this) ? '#287e99' : '#008cba';
         ctx.fillRect(this.x, this.y, this.width, this.height);
+        if (selectedDevices.has(this)) {
+            ctx.strokeStyle = '#f6b85d';
+            ctx.lineWidth = Math.max(1, 2 / Math.max(canvas.clientWidth / canvas.width, 0.1));
+            ctx.strokeRect(this.x + 1, this.y + 1, this.width - 2, this.height - 2);
+        }
         const textScale = Math.sqrt((this.width / this.baseWidth) *
             (this.height / this.baseHeight));
-        const fontSize = Math.max(9, Math.min(32, 14 * textScale));
-        if (this.height >= fontSize + 4) {
+        const fontSize = Math.max(9, Math.min(32, 14 * textScale, this.height - 31,
+            this.multiRowPorts ? 20 : 32));
+        if (this.height >= fontSize + 31) {
             ctx.font = `${fontSize}px Arial`;
             ctx.fillStyle = '#f0f0f0';
             ctx.fillText(this.name, this.x + 5,
-                this.y + Math.min(this.height - 3, fontSize + 3),
+            this.y + fontSize + 4,
                 Math.max(1, this.width - 10));
         }
-        ctx.font = '14px Arial';
+        const portScale = this.portScale();
+        ctx.font = `${Math.max(9, Math.min(28, 14 * portScale))}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
         this.ports.forEach(port => {
             const [color, letter] = connectorMap[port.type];
             ctx.fillStyle = color;
             ctx.beginPath();
-            ctx.arc(port.x, port.y, 10, 0, Math.PI * 2);
+            ctx.arc(port.x, port.y, 10 * portScale, 0, Math.PI * 2);
             ctx.fill();
             if (port === selectedPort) {
                 ctx.strokeStyle = '#fff';
@@ -446,8 +841,10 @@ class Device {
                 ctx.stroke();
             }
             ctx.fillStyle = '#000';
-            ctx.fillText(letter, port.x - 3, port.y + 4);
+            ctx.fillText(letter, port.x, port.y);
         });
+        ctx.textAlign = 'start';
+        ctx.textBaseline = 'alphabetic';
     }
 }
 
@@ -641,9 +1038,114 @@ function draw(showResizeHandles = true) {
         ctx.lineWidth = 2;
         ctx.stroke();
     });
+    drawRackGroups();
     devices.forEach(device => device.draw());
+    if (dragStart && selectionRect) {
+        ctx.fillStyle = 'rgba(90, 177, 197, 0.14)';
+        ctx.strokeStyle = '#8fcac2';
+        ctx.lineWidth = 1;
+        ctx.fillRect(selectionRect.left, selectionRect.top,
+            selectionRect.right - selectionRect.left, selectionRect.bottom - selectionRect.top);
+        ctx.strokeRect(selectionRect.left, selectionRect.top,
+            selectionRect.right - selectionRect.left, selectionRect.bottom - selectionRect.top);
+    }
     if (showResizeHandles) drawResizeHandles();
     drawReferenceHandles();
+}
+let selectionRect = null;
+let marqueeBaseSelection = new Set();
+let marqueeAdditive = false;
+function drawRackGroups() {
+    for (const group of rackGroups) {
+        const frame = rackFrame(group);
+        if (!frame) continue;
+        ctx.fillStyle = 'rgba(38, 58, 72, 0.72)';
+        ctx.fillRect(frame.left, frame.top, frame.right - frame.left, frame.bottom - frame.top);
+        ctx.strokeStyle = '#6a8394';
+        ctx.lineWidth = 3;
+        ctx.strokeRect(frame.left, frame.top, frame.right - frame.left, frame.bottom - frame.top);
+        ctx.strokeStyle = '#b9cad5';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo((frame.left + frame.right) / 2 - 16, frame.top);
+        ctx.lineTo((frame.left + frame.right) / 2 + 16, frame.top);
+        ctx.stroke();
+        ctx.fillStyle = '#b9cad5';
+        ctx.font = '12px Arial';
+        ctx.fillText(group.name, frame.labelX, frame.labelY);
+    }
+}
+function rackFrame(group) {
+    const members = group.devices.filter(device => devices.includes(device));
+    if (!members.length) return null;
+    const left = Math.min(...members.map(device => device.x)) - 14;
+    const top = Math.min(...members.map(device => device.y)) - 12;
+    return {
+        left, top,
+        right: Math.max(...members.map(device => device.x + device.width)) + 14,
+        bottom: Math.max(...members.map(device => device.y + device.height)) + 12,
+        labelX: left + 6,
+        labelY: Math.max(12, top - 3)
+    };
+}
+function rackBoundaryAt(point) {
+    const displayScale = canvas.clientWidth / Math.max(canvas.width, 1);
+    const reach = Math.max(8, 10 / Math.max(displayScale, 0.001));
+    for (const group of rackGroups) {
+        const frame = rackFrame(group);
+        if (!frame || point.x < frame.left - reach || point.x > frame.right + reach ||
+            point.y < frame.top - reach || point.y > frame.bottom + reach) continue;
+        const onHorizontalEdge = point.x >= frame.left - reach && point.x <= frame.right + reach &&
+            (Math.abs(point.y - frame.top) <= reach || Math.abs(point.y - frame.bottom) <= reach);
+        const onVerticalEdge = point.y >= frame.top - reach && point.y <= frame.bottom + reach &&
+            (Math.abs(point.x - frame.left) <= reach || Math.abs(point.x - frame.right) <= reach);
+        if (onHorizontalEdge || onVerticalEdge) return group;
+    }
+    return null;
+}
+function startRackDrag(group, point) {
+    selectedDevices.clear();
+    group.devices.forEach(member => selectedDevices.add(member));
+    selectedDevice = null;
+    draggingDevice = group.devices[0];
+    draggingDevice.offsets = group.devices.map(member => ({ device: member,
+        x: member.x, y: member.y }));
+    draggingDevice.pointerStart = point;
+    selectedLink = null;
+    selectedPort = null;
+    links.forEach(link => { link.selected = false; });
+    showDeviceInfo(null);
+    updateHint();
+    setStatus(`Arrastra el borde del ${group.name} para moverlo completo.`);
+    canvas.style.cursor = 'grabbing';
+    draw();
+}
+function beginRackRename(group, frame) {
+    editingRackGroup = group;
+    rackNameEditor.value = group.name;
+    const canvasRect = canvas.getBoundingClientRect();
+    const wrapRect = canvasWrap.getBoundingClientRect();
+    const scaleX = canvasRect.width / Math.max(canvas.width, 1);
+    const scaleY = canvasRect.height / Math.max(canvas.height, 1);
+    const width = Math.min(260, Math.max(110, (group.name.length * 8 + 28)));
+    rackNameEditor.style.width = `${width}px`;
+    rackNameEditor.style.left = `${Math.max(0, Math.min(wrapRect.width - width,
+        canvasRect.left - wrapRect.left + frame.labelX * scaleX))}px`;
+    rackNameEditor.style.top = `${Math.max(0, canvasRect.top - wrapRect.top +
+        (frame.labelY - 15) * scaleY)}px`;
+    rackNameEditor.hidden = false;
+    rackNameEditor.focus();
+    rackNameEditor.select();
+}
+function finishRackRename(save) {
+    if (!editingRackGroup) return;
+    const name = rackNameEditor.value.trim();
+    if (save && name) editingRackGroup.name = name;
+    const saved = save && Boolean(name);
+    editingRackGroup = null;
+    rackNameEditor.hidden = true;
+    if (saved) setStatus(`Rack renombrado a «${name}».`);
+    draw();
 }
 function distanceToSegment(p, a, b) {
     const dx = b.x - a.x, dy = b.y - a.y;
@@ -652,7 +1154,14 @@ function distanceToSegment(p, a, b) {
     const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / size));
     return Math.hypot(p.x - a.x - t * dx, p.y - a.y - t * dy);
 }
+function isRackInternalLink(link) {
+    const startDevice = devices.find(device => device.ports.includes(link.start));
+    const endDevice = devices.find(device => device.ports.includes(link.end));
+    return Boolean(startDevice && endDevice && rackGroups.some(group =>
+        group.devices.includes(startDevice) && group.devices.includes(endDevice)));
+}
 function cableLength(link) {
+    if (isRackInternalLink(link)) return null;
     return Math.hypot(link.end.x - link.start.x,
         link.end.y - link.start.y) * cmPerPixel;
 }
@@ -660,10 +1169,11 @@ function getCableGroups() {
     const groups = new Map();
     for (const link of links) {
         const [startType, endType] = [link.start.type, link.end.type].sort();
-        const meters = Number((cableLength(link) / 100).toFixed(2));
-        const key = `${startType}\0${endType}\0${meters.toFixed(2)}`;
+        const lengthCm = cableLength(link);
+        const meters = lengthCm === null ? null : Number((lengthCm / 100).toFixed(2));
+        const key = `${startType}\0${endType}\0${meters === null ? 'rack' : meters.toFixed(2)}`;
         if (groups.has(key)) groups.get(key).count++;
-        else groups.set(key, { count: 1, startType, endType, meters });
+        else groups.set(key, { count: 1, startType, endType, meters, internal: meters === null });
     }
     return [...groups.values()];
 }
@@ -716,7 +1226,8 @@ function adjustCableLength(link, lengthCm) {
 function updateSummary() {
     summaryList.replaceChildren();
     const groups = getCableGroups();
-    const total = groups.reduce((sum, group) => sum + group.count * group.meters, 0);
+    const total = groups.reduce((sum, group) => sum +
+        (group.meters === null ? 0 : group.count * group.meters), 0);
     if (links.length === 0) {
         const empty = document.createElement('p');
         empty.textContent = 'Todavía no hay cables. Conecta 2 puertos en el plano.';
@@ -726,14 +1237,20 @@ function updateSummary() {
         const item = document.createElement('div');
         item.className = 'summary-row';
         const name = document.createElement('span');
-        name.textContent = `${group.startType} a ${group.endType} · ${group.meters.toFixed(2)} m`;
+        name.textContent = group.internal ?
+            `${group.startType} a ${group.endType} · interno de rack, sin escala` :
+            `${group.startType} a ${group.endType} · ${group.meters.toFixed(2)} m`;
         const quantity = document.createElement('strong');
         quantity.textContent = `${group.count} cable${group.count === 1 ? '' : 's'}`;
         item.append(name, quantity);
         summaryList.appendChild(item);
     }
-    for (const [label, value] of [['Cables', String(links.length)],
-        ['Longitud total', `${total.toFixed(2)} m`]]) {
+    const internalCount = groups.filter(group => group.internal)
+        .reduce((sum, group) => sum + group.count, 0);
+    const totals = [['Cables', String(links.length)],
+        ['Longitud calculada fuera de rack', `${total.toFixed(2)} m`]];
+    if (internalCount) totals.push(['Cables internos de rack sin escala', String(internalCount)]);
+    for (const [label, value] of totals) {
         const item = document.createElement('div');
         item.className = 'summary-row summary-total';
         const name = document.createElement('span');
@@ -754,13 +1271,16 @@ function showLinkInfo(link) {
     const ends = document.createElement('p');
     ends.textContent = `${sourceDevice?.name ?? 'Origen'} (${link.start.type}) a ` +
         `${targetDevice?.name ?? 'Destino'} (${link.end.type})`;
+    const internal = isRackInternalLink(link);
     const plane = document.createElement('p');
-    plane.textContent = `Distancia según el plano: ${(Math.hypot(link.end.x - link.start.x,
-        link.end.y - link.start.y) * cmPerPixel / 100).toFixed(2)} m`;
+    plane.textContent = internal ? 'Cable dentro del mismo rack: el plano no representa su longitud real.' :
+        `Distancia según el plano: ${(Math.hypot(link.end.x - link.start.x,
+            link.end.y - link.start.y) * cmPerPixel / 100).toFixed(2)} m`;
     const explanation = document.createElement('p');
     const otherCables = links.filter(item => item !== link && targetDevice &&
         (targetDevice.ports.includes(item.start) || targetDevice.ports.includes(item.end))).length;
-    explanation.textContent = `Al cambiarla, se moverá ${targetDevice?.name ?? 'el equipo de destino'}.` +
+    explanation.textContent = internal ? 'Su longitud se excluye de los metros calculados del proyecto.' :
+        `Al cambiarla, se moverá ${targetDevice?.name ?? 'el equipo de destino'}.` +
         (otherCables ? ` También cambiarán ${otherCables} cable${otherCables === 1 ? '' : 's'} conectado${otherCables === 1 ? '' : 's'}.` : '');
     const label = document.createElement('label');
     label.htmlFor = 'real-length';
@@ -768,9 +1288,14 @@ function showLinkInfo(link) {
     const input = document.createElement('input');
     input.type = 'number'; input.id = 'real-length'; input.min = '0.01';
     input.step = 'any'; input.placeholder = 'Introduce la longitud';
-    input.value = (cableLength(link) / 100).toFixed(2);
+    input.value = internal ? '' : (cableLength(link) / 100).toFixed(2);
     const button = document.createElement('button');
     button.textContent = 'Mover equipo';
+    if (internal) {
+        label.hidden = true;
+        input.hidden = true;
+        button.hidden = true;
+    }
     button.addEventListener('click', () => {
         const raw = input.value.trim();
         const value = Number(raw);
@@ -795,6 +1320,16 @@ function showLinkInfo(link) {
 }
 function showDeviceInfo(device) {
     linkInfo.replaceChildren();
+    if (!device) {
+        if (selectedDevices.size > 1) {
+            const title = document.createElement('h3');
+            title.textContent = `${selectedDevices.size} equipos seleccionados`;
+            const description = document.createElement('p');
+            description.textContent = 'Clic derecho para agruparlos como rack o eliminarlos.';
+            linkInfo.append(title, description);
+        }
+        return;
+    }
     const title = document.createElement('h3');
     title.textContent = device.name;
     const description = document.createElement('p');
@@ -804,6 +1339,18 @@ function showDeviceInfo(device) {
     remove.textContent = 'Eliminar equipo';
     remove.addEventListener('click', () => deleteDevice(device));
     linkInfo.append(title, description);
+    if (device.catalogProduct?.sources?.length) {
+        const source = device.catalogProduct.sources.find(url =>
+            url.includes('jblpro.com') || url.includes('crownaudio.com') || url.includes('bssaudio.com')) ||
+            device.catalogProduct.sources[0];
+        const sourceLink = document.createElement('a');
+        sourceLink.className = 'import-source-link';
+        sourceLink.href = source;
+        sourceLink.target = '_blank';
+        sourceLink.rel = 'noopener noreferrer';
+        sourceLink.textContent = 'Consultar ficha del modelo';
+        linkInfo.appendChild(sourceLink);
+    }
     linkInfo.appendChild(remove);
 }
 function connectPorts(start, end) {
@@ -849,6 +1396,11 @@ function deleteDevice(device) {
     links.length = 0;
     links.push(...remaining);
     devices.splice(index, 1);
+    selectedDevices.delete(device);
+    for (let i = rackGroups.length - 1; i >= 0; i--) {
+        rackGroups[i].devices = rackGroups[i].devices.filter(member => member !== device);
+        if (rackGroups[i].devices.length < 2) rackGroups.splice(i, 1);
+    }
     if (selectedDevice === device) selectedDevice = null;
     if (selectedLink && !links.includes(selectedLink)) selectedLink = null;
     selectedPort = null;
@@ -859,6 +1411,140 @@ function deleteDevice(device) {
     updateHint();
     draw();
     setStatus(`${device.name} eliminado${removedLinks ? ` con ${removedLinks} cable${removedLinks === 1 ? '' : 's'}` : ''}.`);
+}
+function deleteSelectedDevices() {
+    const targets = [...selectedDevices];
+    if (!targets.length && selectedDevice) targets.push(selectedDevice);
+    if (!targets.length) return false;
+    const count = targets.length;
+    targets.forEach(deleteDevice);
+    selectedDevices.clear();
+    selectedDevice = null;
+    showDeviceInfo(null);
+    draw();
+    setStatus(`${count} equipo${count === 1 ? '' : 's'} eliminado${count === 1 ? '' : 's'}.`);
+    return true;
+}
+function hideContextMenu() { contextMenu.hidden = true; }
+function openContextMenu(event) {
+    event.preventDefault();
+    const point = pointOnCanvas(event);
+    const device = [...devices].reverse().find(item => item.contains(point));
+    const deviceRack = device && rackGroups.find(group => group.devices.includes(device));
+    if (device && (deviceRack && (selectedDevices.size !== 1 || !selectedDevices.has(device)) ||
+        !deviceRack && !selectedDevices.has(device))) {
+        selectedDevices.clear();
+        selectedDevices.add(device);
+        selectedDevice = device;
+        showDeviceInfo(device);
+        updateHint();
+        draw();
+    }
+    const frameGroup = !device && rackGroups.find(group => {
+        const frame = rackFrame(group);
+        return frame && point.x >= frame.left && point.x <= frame.right &&
+            point.y >= frame.top && point.y <= frame.bottom;
+    });
+    if (frameGroup) {
+        selectedDevices.clear();
+        frameGroup.devices.forEach(member => selectedDevices.add(member));
+        selectedDevice = null;
+        showDeviceInfo(null);
+        updateHint();
+        draw();
+    }
+    if (!selectedDevices.size) return;
+    const hasGroup = rackGroups.some(group => group.devices.length > 1 &&
+        group.devices.every(item => selectedDevices.has(item)));
+    const alreadyOneRack = rackGroups.some(group => group.devices.length === selectedDevices.size &&
+        group.devices.every(item => selectedDevices.has(item)));
+    const oneMember = selectedDevices.size === 1 ? [...selectedDevices][0] : null;
+    const selectedRack = oneMember && rackGroups.find(group => group.devices.includes(oneMember));
+    const selectedIndex = selectedRack?.devices.indexOf(oneMember) ?? -1;
+    groupMenuButton.hidden = selectedDevices.size < 2 || alreadyOneRack;
+    ungroupMenuButton.hidden = !hasGroup;
+    rackUpMenuButton.hidden = !selectedRack || selectedIndex <= 0;
+    rackDownMenuButton.hidden = !selectedRack || selectedIndex < 0 || selectedIndex >= selectedRack.devices.length - 1;
+    rackRemoveMenuButton.hidden = !selectedRack;
+    deleteMenuButton.textContent = selectedDevices.size > 1 ?
+        `Eliminar ${selectedDevices.size} equipos` : 'Eliminar equipo';
+    const wrap = canvasWrap.getBoundingClientRect();
+    contextMenu.hidden = false;
+    contextMenu.style.left = `${Math.max(0, Math.min(event.clientX - wrap.left,
+        wrap.width - contextMenu.offsetWidth))}px`;
+    contextMenu.style.top = `${Math.max(0, Math.min(event.clientY - wrap.top,
+        wrap.height - contextMenu.offsetHeight))}px`;
+    const firstAction = [...contextMenu.querySelectorAll('button:not([hidden])')][0];
+    firstAction?.focus();
+}
+function groupSelectedDevices() {
+    const members = [...selectedDevices];
+    if (members.length < 2) {
+        setStatus('Selecciona al menos 2 equipos para crear un rack.');
+        return;
+    }
+    for (const device of members) {
+        for (let i = rackGroups.length - 1; i >= 0; i--) {
+            rackGroups[i].devices = rackGroups[i].devices.filter(member => member !== device);
+            if (rackGroups[i].devices.length < 2) rackGroups.splice(i, 1);
+        }
+    }
+    const group = { name: `Rack ${nextRackNumber++}`, devices: members };
+    rackGroups.push(group);
+    layoutRack(group);
+    updateSummary();
+    draw();
+    setStatus(`Rack creado con ${members.length} equipos apilados.`);
+}
+function layoutRack(group, origin = null) {
+    const members = group.devices.filter(device => devices.includes(device));
+    if (!members.length) return;
+    const width = Math.max(...members.map(device => device.width));
+    const height = members.reduce((sum, device) => sum + device.height, 0) +
+        Math.max(0, members.length - 1) * 8;
+    const left = Math.min(origin?.x ?? Math.min(...members.map(device => device.x)),
+        Math.max(0, canvas.width - width));
+    const top = Math.min(origin?.y ?? Math.min(...members.map(device => device.y)),
+        Math.max(0, canvas.height - height));
+    let y = top;
+    for (const device of members) {
+        device.moveExact(left + (width - device.width) / 2, y);
+        y += device.height + 8;
+    }
+}
+function moveRackMember(device, direction) {
+    const group = rackGroups.find(item => item.devices.includes(device));
+    if (!group) return;
+    const index = group.devices.indexOf(device);
+    const target = index + direction;
+    if (target < 0 || target >= group.devices.length) return;
+    const top = Math.min(...group.devices.map(member => member.y));
+    const left = Math.min(...group.devices.map(member => member.x));
+    [group.devices[index], group.devices[target]] = [group.devices[target], group.devices[index]];
+    layoutRack(group, { x: left, y: top });
+    draw();
+    setStatus(`${device.name} movido ${direction < 0 ? 'hacia arriba' : 'hacia abajo'} en ${group.name}.`);
+}
+function removeDeviceFromRack(device) {
+    const index = rackGroups.findIndex(item => item.devices.includes(device));
+    if (index < 0) return;
+    const group = rackGroups[index];
+    group.devices = group.devices.filter(member => member !== device);
+    if (group.devices.length < 2) rackGroups.splice(index, 1);
+    else layoutRack(group);
+    updateSummary();
+    draw();
+    setStatus(`${device.name} sacado del rack.`);
+}
+function ungroupSelectedDevices() {
+    const targets = new Set(selectedDevices);
+    for (let i = rackGroups.length - 1; i >= 0; i--) {
+        const group = rackGroups[i];
+        if (group.devices.some(device => targets.has(device))) rackGroups.splice(i, 1);
+    }
+    updateSummary();
+    draw();
+    setStatus('Rack desagrupado.');
 }
 function createTemplate() {
     const name = deviceNameInput.value.trim();
@@ -886,26 +1572,16 @@ function createTemplate() {
         extraConnectorsPanel.open = true;
         return;
     }
-    templates.push({ name, types });
-    const option = document.createElement('option');
-    option.value = templates.length - 1;
-    option.textContent = name;
-    deviceSelect.appendChild(option);
-    deviceSelect.disabled = false;
-    deviceSelect.value = option.value;
-    document.getElementById('add-device').disabled = false;
+    pendingTemplate = { name, types };
     deviceNameInput.value = '';
     connectorCountInput.value = '1';
     for (const entry of extraConnectorInputs.values()) entry.input.value = '0';
     extraConnectorsPanel.open = false;
-    addDevice();
-}
-function addDevice() {
     if (backgroundImage && !referenceConfirmed) {
+        pendingTemplate = null;
         setStatus('Confirma la distancia entre A y B antes de colocar equipos.');
         return;
     }
-    pendingTemplate = templates[Number(deviceSelect.value)] || null;
     if (pendingTemplate) {
         canvas.style.cursor = 'crosshair';
         setStatus(`Haz clic en el plano para colocar ${pendingTemplate.name}.`);
@@ -913,6 +1589,103 @@ function addDevice() {
         canvas.scrollIntoView?.({ block: 'center' });
         canvas.focus?.({ preventScroll: true });
     }
+}
+function getCatalogConnectorTypes(product) {
+    if (!Array.isArray(product.connectors) || !product.connectors.length) return [];
+    if (product.connectors.some(connector => !connectorMap[connector.type] ||
+        !Number.isInteger(Number(connector.count)) || Number(connector.count) < 1)) return [];
+    return product.connectors.flatMap(connector =>
+        Array(Number(connector.count)).fill(connector.type));
+}
+function renderCatalogSearch() {
+    const query = normalizeCatalogKey(catalogSearchInput.value);
+    catalogSearchResults.replaceChildren();
+    if (query.length < 2) {
+        const empty = document.createElement('p');
+        empty.className = 'catalog-search-empty';
+        empty.textContent = 'Escribe al menos 2 caracteres para buscar modelos con conectores disponibles.';
+        catalogSearchResults.appendChild(empty);
+        return;
+    }
+    const matches = harmanProductCatalog.map(product => ({
+        product,
+        types: getCatalogConnectorTypes(product)
+    })).filter(({ product, types }) => types.length && [product.brand, product.reference,
+        product.model, product.title, product.series, product.category]
+        .some(value => normalizeCatalogKey(value).includes(query)))
+        .sort((a, b) => {
+            const score = ({ product }) => [product.reference, product.model]
+                .some(value => normalizeCatalogKey(value).startsWith(query)) ? 0 : 1;
+            return score(a) - score(b) || a.product.model.localeCompare(b.product.model);
+        }).slice(0, 30);
+    if (!matches.length) {
+        const empty = document.createElement('p');
+        empty.className = 'catalog-search-empty';
+        empty.textContent = 'No hay coincidencias con conectores disponibles para esa búsqueda.';
+        catalogSearchResults.appendChild(empty);
+        return;
+    }
+    for (const { product, types } of matches) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'catalog-result';
+        button.setAttribute('aria-label', `Añadir ${product.brand} ${product.model}, ${types.length} conectores`);
+        const title = document.createElement('strong');
+        title.textContent = `${product.brand} ${product.model || product.reference}`;
+        const detail = document.createElement('span');
+        detail.textContent = [product.category, product.reference !== product.model ? product.reference : '']
+            .filter(Boolean).join(' · ');
+        const byType = new Map();
+        types.forEach(type => byType.set(type, (byType.get(type) || 0) + 1));
+        const connectorList = document.createElement('span');
+        connectorList.className = 'catalog-connectors';
+        connectorList.textContent = [...byType].map(([type, count]) => `${count} × ${type}`).join(' · ');
+        button.append(title, detail, connectorList);
+        button.addEventListener('click', () => addCatalogDevice(product, types));
+        catalogSearchResults.appendChild(button);
+    }
+}
+function findDevicePlacement(device) {
+    const gap = 16;
+    const step = gridSize;
+    for (let y = gridSize; y + device.height <= canvas.height; y += step) {
+        for (let x = gridSize; x + device.width <= canvas.width; x += step) {
+            const overlaps = devices.some(other =>
+                x < other.x + other.width + gap && x + device.width + gap > other.x &&
+                y < other.y + other.height + gap && y + device.height + gap > other.y);
+            if (!overlaps) return { x, y };
+        }
+    }
+    return null;
+}
+function addCatalogDevice(product, types = getCatalogConnectorTypes(product)) {
+    if (!types.length) {
+        setStatus(`El catálogo no tiene conectores compatibles para ${product.model}.`);
+        return;
+    }
+    if (backgroundImage && !referenceConfirmed) {
+        setStatus('Confirma primero la escala del plano para añadir equipos del catálogo.');
+        return;
+    }
+    const name = `${product.brand} ${product.model || product.reference}`;
+    const device = new Device(name, types, 0, 0);
+    const placement = findDevicePlacement(device);
+    if (!placement) {
+        setStatus(`No queda espacio en el plano para añadir ${name}.`);
+        return;
+    }
+    freezePlanSize();
+    device.moveExact(placement.x, placement.y);
+    device.catalogProduct = product;
+    devices.push(device);
+    selectedDevices.clear();
+    selectedDevices.add(device);
+    selectedDevice = device;
+    updateSummary();
+    updateHint();
+    showDeviceInfo(device);
+    draw();
+    setStatus(`${name} añadido al plano con ${types.length} conectores del catálogo.`);
 }
 function segmentIntersectsRect(a, b, r) {
     const dx = b.x - a.x, dy = b.y - a.y;
@@ -934,6 +1707,18 @@ function selectInDrag(a, b) {
     const rect = { left: Math.min(a.x, b.x), right: Math.max(a.x, b.x),
         top: Math.min(a.y, b.y), bottom: Math.max(a.y, b.y) };
     links.forEach(link => { link.selected = segmentIntersectsRect(link.start, link.end, rect); });
+    selectionRect = rect;
+    selectedDevices.clear();
+    if (marqueeAdditive) marqueeBaseSelection.forEach(device => selectedDevices.add(device));
+    for (const device of devices) {
+        if (device.x <= rect.right && device.x + device.width >= rect.left &&
+            device.y <= rect.bottom && device.y + device.height >= rect.top) {
+            selectedDevices.add(device);
+        }
+    }
+    selectedDevice = selectedDevices.size === 1 ? [...selectedDevices][0] : null;
+    if (selectedDevices.size === 1) showDeviceInfo(selectedDevice);
+    else if (selectedDevices.size > 1) showDeviceInfo(null);
     selectedLink = null;
     showLinkInfo(null);
     draw();
@@ -948,7 +1733,9 @@ function referenceAt(point) {
 }
 
 canvas.addEventListener('pointerdown', event => {
+    if (event.button === 2) return;
     const point = pointOnCanvas(event);
+    hideContextMenu();
     const reference = referenceAt(point);
     if (reference) {
         draggingReference = reference;
@@ -963,11 +1750,20 @@ canvas.addEventListener('pointerdown', event => {
             backgroundImage ? point.x : Math.round(point.x / gridSize) * gridSize,
             backgroundImage ? point.y : Math.round(point.y / gridSize) * gridSize);
         devices.push(device);
+        selectedDevices.clear();
+        selectedDevices.add(device);
+        selectedDevice = device;
         pendingTemplate = null;
         canvas.style.cursor = '';
         setStatus(`${device.name} colocado. Puedes arrastrarlo o conectar sus puertos.`);
+        showDeviceInfo(device);
         updateHint();
         draw();
+        return;
+    }
+    const rackBoundary = rackBoundaryAt(point);
+    if (rackBoundary) {
+        startRackDrag(rackBoundary, point);
         return;
     }
     const resizeHandle = selectedDevice && resizeHandleAt(selectedDevice, point);
@@ -1001,9 +1797,30 @@ canvas.addEventListener('pointerdown', event => {
     }
     const device = [...devices].reverse().find(item => item.contains(point));
     if (device) {
+        hideContextMenu();
+        if (event.ctrlKey || event.shiftKey) {
+            if (selectedDevices.has(device)) selectedDevices.delete(device);
+            else selectedDevices.add(device);
+            selectedDevice = selectedDevices.size === 1 ? [...selectedDevices][0] : null;
+            if (selectedDevices.size === 1) showDeviceInfo(selectedDevice);
+            else showDeviceInfo(null);
+            updateHint();
+            draw();
+            return;
+        }
+        const memberRack = rackGroups.find(group => group.devices.includes(device));
+        if (memberRack) {
+            selectedDevices.clear();
+            selectedDevices.add(device);
+        } else if (!selectedDevices.has(device)) {
+            selectedDevices.clear();
+            selectedDevices.add(device);
+        }
         draggingDevice = device;
-        device.offset = { x: point.x - device.x, y: point.y - device.y };
-        selectedDevice = device;
+        draggingDevice.offsets = [...selectedDevices].map(member => ({ device: member,
+            x: member.x, y: member.y }));
+        draggingDevice.pointerStart = point;
+        selectedDevice = selectedDevices.size === 1 ? device : null;
         selectedLink = null;
         selectedPort = null;
         links.forEach(item => { item.selected = false; });
@@ -1012,6 +1829,15 @@ canvas.addEventListener('pointerdown', event => {
         setStatus(`${device.name} seleccionado. Arrástralo para moverlo o usa los puntos para cambiar el tamaño.`);
         canvas.style.cursor = 'grabbing';
         draw();
+        return;
+    }
+    const rack = rackGroups.find(group => {
+        const frame = rackFrame(group);
+        return frame && point.x >= frame.left && point.x <= frame.right &&
+            point.y >= frame.top && point.y <= frame.bottom;
+    });
+    if (rack) {
+        startRackDrag(rack, point);
         return;
     }
     const link = [...links].reverse().find(item =>
@@ -1030,9 +1856,14 @@ canvas.addEventListener('pointerdown', event => {
     selectedPort = null;
     selectedLink = null;
     selectedDevice = null;
+    marqueeAdditive = event.ctrlKey || event.shiftKey;
+    marqueeBaseSelection = new Set(selectedDevices);
+    if (!marqueeAdditive) selectedDevices.clear();
+    selectionRect = null;
     links.forEach(item => { item.selected = false; });
     showLinkInfo(null);
     dragStart = point;
+    canvas.setPointerCapture?.(event.pointerId);
     updateHint();
     draw();
 });
@@ -1049,13 +1880,20 @@ canvas.addEventListener('pointermove', event => {
         canvas.style.cursor = resizeCursor(resizingDevice.handle);
         draw();
     } else if (draggingDevice) {
-        draggingDevice.move(point.x - draggingDevice.offset.x,
-            point.y - draggingDevice.offset.y);
+        const dx = point.x - draggingDevice.pointerStart.x;
+        const dy = point.y - draggingDevice.pointerStart.y;
+        draggingDevice.offsets.forEach(({ device, x, y }) => device.move(x + dx, y + dy));
         updateSummary();
         draw();
     } else if (dragStart && Math.hypot(point.x - dragStart.x,
         point.y - dragStart.y) > 3) selectInDrag(dragStart, point);
     else if (!dragStart && !pendingTemplate) {
+        const rackBoundary = rackBoundaryAt(point);
+        if (rackBoundary) {
+            canvas.style.cursor = 'move';
+            setStatus(`Arrastra el borde del ${rackBoundary.name} para moverlo completo.`);
+            return;
+        }
         const reference = referenceAt(point);
         if (reference) {
             canvas.style.cursor = 'grab';
@@ -1084,28 +1922,132 @@ function finishPointer() {
         setStatus(`${resizingDevice.device.name}: tamaño actualizado.`);
     }
     if (draggingDevice) {
-        showDeviceInfo(draggingDevice);
-        setStatus(`${draggingDevice.name} movido.`);
+        const rack = selectedDevices.size === 1 && rackGroups.find(group =>
+            group.devices.includes(draggingDevice));
+        const wholeRack = selectedDevices.size > 1 && rackGroups.find(group =>
+            group.devices.length === selectedDevices.size &&
+            group.devices.every(device => selectedDevices.has(device)));
+        if (wholeRack) {
+            const left = Math.min(...wholeRack.devices.map(device => device.x));
+            const top = Math.min(...wholeRack.devices.map(device => device.y));
+            layoutRack(wholeRack, { x: left, y: top });
+            showDeviceInfo(null);
+            setStatus(`${wholeRack.name} movido.`);
+        } else if (rack) {
+            const left = Math.min(...rack.devices.map(device => device.x));
+            const top = Math.min(...rack.devices.map(device => device.y));
+            rack.devices.sort((a, b) => a.y - b.y || a.x - b.x);
+            layoutRack(rack, { x: left, y: top });
+            showDeviceInfo(draggingDevice);
+            setStatus(`${draggingDevice.name} recolocado dentro de ${rack.name}.`);
+        } else {
+            if (selectedDevices.size > 1) showDeviceInfo(null);
+            else showDeviceInfo(draggingDevice);
+            setStatus(selectedDevices.size > 1 ? `${selectedDevices.size} equipos movidos.` : `${draggingDevice.name} movido.`);
+        }
     }
     draggingDevice = null;
     resizingDevice = null;
     draggingReference = null;
     dragStart = null;
+    selectionRect = null;
+    if (selectedDevices.size === 1) selectedDevice = [...selectedDevices][0];
+    if (selectedDevices.size > 1) selectedDevice = null;
+    draw();
+    updateHint();
     if (!pendingTemplate) canvas.style.cursor = '';
 }
 window.addEventListener('pointerup', finishPointer);
 window.addEventListener('pointercancel', finishPointer);
 document.addEventListener('keydown', event => {
-    if (event.key === 'Escape') cancelAction();
+    if (event.key === 'Escape') { cancelAction(); hideContextMenu(); }
     const activeElement = document.activeElement;
     const editingText = activeElement?.matches?.('input, textarea, select, [contenteditable="true"]');
-    if (event.key === 'Delete' && !editingText) {
-        if (selectedDevice) deleteDevice(selectedDevice);
+    if (editingText) return;
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
+        if (!selectedDevices.size) return;
+        event.preventDefault();
+        const items = [...selectedDevices];
+        const minX = Math.min(...items.map(device => device.x));
+        const minY = Math.min(...items.map(device => device.y));
+        deviceClipboard = items.map(device => ({ name: device.name,
+            types: device.ports.map(port => port.type), x: device.x - minX, y: device.y - minY,
+            width: device.width, height: device.height, catalogProduct: device.catalogProduct || null }));
+        pasteCount = 0;
+        setStatus(`${deviceClipboard.length} equipo${deviceClipboard.length === 1 ? '' : 's'} copiado${deviceClipboard.length === 1 ? '' : 's'}.`);
+    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') {
+        if (!deviceClipboard.length) return;
+        event.preventDefault();
+        const offset = gridSize * (++pasteCount);
+        selectedDevices.clear();
+        for (const item of deviceClipboard) {
+            const device = new Device(item.name, item.types, item.x + offset, item.y + offset);
+            device.width = item.width;
+            device.height = item.height;
+            device.moveExact(item.x + offset, item.y + offset);
+            if (item.catalogProduct) device.catalogProduct = item.catalogProduct;
+            devices.push(device);
+            selectedDevices.add(device);
+        }
+        selectedDevice = selectedDevices.size === 1 ? [...selectedDevices][0] : null;
+        freezePlanSize();
+        showDeviceInfo(selectedDevice);
+        updateSummary();
+        draw();
+        setStatus(`${selectedDevices.size} equipo${selectedDevices.size === 1 ? '' : 's'} pegado${selectedDevices.size === 1 ? '' : 's'}.`);
+    } else if (event.key === 'Delete' && !editingText) {
+        if (selectedDevices.size) deleteSelectedDevices();
         else deleteSelectedLinks();
+        event.preventDefault();
     }
 });
 document.getElementById('create-device').addEventListener('click', createTemplate);
-document.getElementById('add-device').addEventListener('click', addDevice);
+canvas.addEventListener('contextmenu', openContextMenu);
+canvas.addEventListener('dblclick', event => {
+    const point = pointOnCanvas(event);
+    for (const group of rackGroups) {
+        const frame = rackFrame(group);
+        if (!frame) continue;
+        ctx.font = '12px Arial';
+        const labelWidth = ctx.measureText(group.name).width;
+        if (point.x >= frame.labelX && point.x <= frame.labelX + labelWidth + 8 &&
+            point.y >= frame.labelY - 14 && point.y <= frame.labelY + 4) {
+            event.preventDefault();
+            beginRackRename(group, frame);
+            return;
+        }
+    }
+});
+rackNameEditor.addEventListener('blur', () => finishRackRename(true));
+rackNameEditor.addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        finishRackRename(true);
+    } else if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        finishRackRename(false);
+    }
+});
+catalogSearchInput.addEventListener('input', renderCatalogSearch);
+groupMenuButton.addEventListener('click', () => { groupSelectedDevices(); hideContextMenu(); });
+ungroupMenuButton.addEventListener('click', () => { ungroupSelectedDevices(); hideContextMenu(); });
+rackUpMenuButton.addEventListener('click', () => {
+    moveRackMember([...selectedDevices][0], -1);
+    hideContextMenu();
+});
+rackDownMenuButton.addEventListener('click', () => {
+    moveRackMember([...selectedDevices][0], 1);
+    hideContextMenu();
+});
+rackRemoveMenuButton.addEventListener('click', () => {
+    removeDeviceFromRack([...selectedDevices][0]);
+    hideContextMenu();
+});
+deleteMenuButton.addEventListener('click', () => { deleteSelectedDevices(); hideContextMenu(); });
+document.addEventListener('pointerdown', event => {
+    if (!contextMenu.hidden && !contextMenu.contains(event.target)) hideContextMenu();
+});
 projectForm.addEventListener('submit', startProject);
 projectTitle.addEventListener('click', startProjectRename);
 projectTitleInput.addEventListener('blur', () => finishProjectRename(true));
@@ -1124,6 +2066,18 @@ projectTitleInput.addEventListener('keydown', event => {
 });
 newProjectButton.addEventListener('click', newProject);
 savePdfButton.addEventListener('click', saveProjectPdf);
+importDesignButton.addEventListener('click', () => {
+    fileMenu.open = false;
+    designImportFile.click();
+});
+designImportFile.addEventListener('change', () => {
+    const file = designImportFile.files?.[0];
+    designImportFile.value = '';
+    handleExcelImport(file);
+});
+cancelImportButton.addEventListener('click', () => importPreview.close());
+confirmImportButton.addEventListener('click', importSelectedExcelRows);
+importPreview.addEventListener('close', () => { pendingExcelImport = []; });
 imageInput.addEventListener('change', () => loadPlanImage(imageInput.files?.[0]));
 removePhotoButton.addEventListener('click', removePhoto);
 resetScaleButton.addEventListener('click', resetScale);

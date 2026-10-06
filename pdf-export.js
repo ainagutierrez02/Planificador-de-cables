@@ -46,7 +46,10 @@
             jpeg, binaryBytes('\nendstream')];
 
         const cableCount = rows.reduce((sum, row) => sum + row.count, 0);
-        const total = rows.reduce((sum, row) => sum + row.count * row.meters, 0);
+        const total = rows.reduce((sum, row) => sum +
+            (row.meters === null ? 0 : row.count * row.meters), 0);
+        const internalCount = rows.filter(row => row.internal)
+            .reduce((sum, row) => sum + row.count, 0);
         pages.forEach((pageRows, pageIndex) => {
             const first = pageIndex === 0;
             const contentId = 5 + pageIndex * 2;
@@ -72,15 +75,18 @@
             pageRows.forEach((row, index) => {
                 const y = headerY - 22 - index * 18;
                 const amount = `${row.count} cable${row.count === 1 ? '' : 's'}`;
-                const length = row.meters.toFixed(2).replace('.', ',');
-                const each = row.count > 1 ? ' cada uno' : '';
+                const lengthText = row.meters === null ?
+                    'longitud sin escala (interior de rack)' :
+                    `de ${row.meters.toFixed(2).replace('.', ',')} m${row.count > 1 ? ' cada uno' : ''}`;
                 content += textLine(37, y,
-                    `${amount} ${row.startType} a ${row.endType} de ${length} m${each}`, 10, 110);
+                    `${amount} ${row.startType} a ${row.endType} ${lengthText}`, 10, 110);
             });
             if (pageIndex === pages.length - 1) {
                 content += `0.35 0.42 0.48 RG 30 48 m ${pageWidth - 30} 48 l S\n`;
                 content += textLine(340, 30,
-                    `Longitud total: ${total.toFixed(2).replace('.', ',')} m`, 10);
+                    `Longitud calculada fuera de rack: ${total.toFixed(2).replace('.', ',')} m`, 10);
+                if (internalCount) content += textLine(37, 65,
+                    `Cables internos de rack sin escala: ${internalCount}`, 9);
             }
             objects[contentId] = streamObject(binaryBytes(content));
             objects[pageId] = [binaryBytes(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 3 0 R >> /XObject << /Im1 4 0 R >> >> /Contents ${contentId} 0 R >>`)];
